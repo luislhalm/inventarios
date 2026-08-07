@@ -257,6 +257,9 @@ nav.tabs svg{width:22px;height:22px;}
 .centro{text-align:center;color:var(--texto-claro);font-size:.85rem;padding:20px 0;}
 
 .crear-inline{display:flex;gap:8px;margin-top:8px;}
+.crear-inline-col{flex-direction:column;align-items:stretch;}
+.crear-inline-fila{display:flex;flex-direction:column;gap:3px;}
+.etiqueta-mini{font-size:.68rem;color:var(--texto-claro);font-weight:600;text-transform:uppercase;letter-spacing:.03em;}
 .crear-inline input{
   flex:1;padding:9px 10px;border-radius:9px;border:1.5px solid var(--border);font-size:.85rem;
 }
@@ -311,10 +314,19 @@ nav.tabs svg{width:22px;height:22px;}
       <input id="input-nuevo-almacen" placeholder="Nombre del nuevo almacén">
       <button id="btn-crear-almacen">Crear</button>
     </div>
-    <div id="panel-nuevo-inventario" style="display:none" class="crear-inline">
-      <input id="input-nuevo-inventario" type="month">
+    <div id="panel-nuevo-inventario" style="display:none" class="crear-inline crear-inline-col">
+      <div class="crear-inline-fila">
+        <label class="etiqueta-mini" for="input-nuevo-inventario">Nombre / mes</label>
+        <input id="input-nuevo-inventario" placeholder="Ej. 2026-08">
+      </div>
+      <div class="crear-inline-fila">
+        <label class="etiqueta-mini" for="input-fecha-inventario">Fecha y hora del recuento</label>
+        <input id="input-fecha-inventario" type="datetime-local">
+      </div>
       <button id="btn-crear-inventario">Crear</button>
     </div>
+
+    <div class="estado-conexion" id="info-inventario-actual" style="display:none;"></div>
 
     <div class="estado-conexion" id="estado-conexion">
       <span class="punto"></span> Conectando con SharePoint…
@@ -385,8 +397,10 @@ const state = {
   siteId: null,
   driveId: null,
   articulos: [],
+  articulosPorCodigo: new Map(),
   almacenes: [],
   inventarios: [],
+  inventariosInfo: {},
   almacenActual: "",
   inventarioActual: "",
   vista: "registrar",
@@ -410,6 +424,18 @@ function parseNum(s){
 }
 function fmtTon(n){
   return n.toLocaleString("es-ES", {minimumFractionDigits:3, maximumFractionDigits:3});
+}
+function fmtCantidad(n){
+  if (Math.abs(n - Math.round(n)) < 0.005) return Math.round(n).toLocaleString("es-ES");
+  return n.toLocaleString("es-ES", {minimumFractionDigits:2, maximumFractionDigits:2});
+}
+// Convierte un total en toneladas a la unidad base propia del artículo (Sacos, Unidades, Toneladas…)
+function aUnidadBase(totalToneladas, articulo){
+  const base = articulo?.unidades?.[0];
+  if (!base || !base.factor){
+    return { cantidad: totalToneladas, nombre: "Ton" };
+  }
+  return { cantidad: totalToneladas / base.factor, nombre: base.nombre };
 }
 function fmtFecha(iso){
   const d = new Date(iso);
@@ -435,10 +461,16 @@ function abrirSelectorAlmacen(){
   $("#sel-almacen").scrollIntoView({behavior:"smooth", block:"center"});
   $("#sel-almacen").focus();
 }
+function fechaHoraLocalInput(){
+  const d = new Date();
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0,16);
+}
 function abrirCreadorInventario(){
   if (!state.almacenActual) return abrirCreadorAlmacen();
   $("#panel-nuevo-inventario").style.display = "flex";
   if (!$("#input-nuevo-inventario").value) $("#input-nuevo-inventario").value = mesActual();
+  if (!$("#input-fecha-inventario").value) $("#input-fecha-inventario").value = fechaHoraLocalInput();
   $("#panel-nuevo-inventario").scrollIntoView({behavior:"smooth", block:"center"});
   $("#input-nuevo-inventario").focus();
 }
@@ -625,11 +657,29 @@ async function loadMaster(){
   if (!ws) throw new Error(`No se encontró la hoja "${hoja}" en el Excel maestro.`);
   const filas = XLSX.utils.sheet_to_json(ws, { defval:"" });
   state.articulos = filas.map(normalizarArticulo).filter(a => a.codigo);
+  state.articulosPorCodigo = new Map(state.articulos.map(a => [a.codigo, a]));
 }
 
 /* ---------- registros ---------- */
 function carpetaInventario(){
   return `${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${state.inventarioActual}`;
+}
+
+async function guardarInfoInventario(carpeta, info){
+  await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/_info.json:/content`, {
+    method:"PUT",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(info),
+  });
+}
+
+async function leerInfoInventario(carpeta){
+  try{
+    const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/_info.json:/content`);
+    return await res.json();
+  }catch(e){
+    return null;
+  }
 }
 
 async function guardarRegistro(registro){
@@ -725,9 +775,17 @@ async function cargarAlmacenes(){
 async function cargarInventarios(){
   if (!state.almacenActual){ $("#sel-inventario").innerHTML = ""; return renderVista(); }
   state.inventarios = await listChildFolders(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`);
+  state.inventariosInfo = {};
+  for (const nombre of state.inventarios){
+    const carpeta = `${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`;
+    state.inventariosInfo[nombre] = await leerInfoInventario(carpeta);
+  }
   const sel = $("#sel-inventario");
-  sel.innerHTML = state.inventarios.map(i=>`<option value="${i}">${i}</option>`).join("")
-    + `<option value="__nuevo__">+ Nuevo inventario…</option>`;
+  sel.innerHTML = state.inventarios.map(i=>{
+    const info = state.inventariosInfo[i];
+    const etiqueta = info?.fecha ? `${i} — ${fmtFecha(info.fecha)}` : i;
+    return `<option value="${i}">${etiqueta}</option>`;
+  }).join("") + `<option value="__nuevo__">+ Nuevo inventario…</option>`;
   if (state.inventarios.length){
     state.inventarioActual = state.inventarios[0];
     sel.value = state.inventarioActual;
@@ -737,6 +795,7 @@ async function cargarInventarios(){
     state.inventarioActual = "";
     sel.value = "__nuevo__";
     $("#input-nuevo-inventario").value = mesActual();
+    $("#input-fecha-inventario").value = fechaHoraLocalInput();
     $("#panel-nuevo-inventario").style.display = "flex";
   }
   renderVista();
@@ -807,7 +866,7 @@ function renderRegistrar(){
 
       <div class="resumen-total">
         <span class="etiqueta">Total registro</span>
-        <span class="valor" id="total-toneladas">0,000 Ton</span>
+        <span class="valor" id="total-toneladas">0 ${art.unidades[0]?.nombre || "Ton"}</span>
       </div>
 
       <button class="btn-primario" id="btn-guardar-registro" disabled>Guardar registro</button>
@@ -828,7 +887,8 @@ function renderRegistrar(){
   const actualizarTotal = () => {
     let total = 0;
     inputs.forEach(inp => { total += parseNum(inp.value) * parseFloat(inp.dataset.factor); });
-    $("#total-toneladas").textContent = fmtTon(total) + " Ton";
+    const { cantidad, nombre } = aUnidadBase(total, art);
+    $("#total-toneladas").textContent = fmtCantidad(cantidad) + " " + nombre;
     $("#btn-guardar-registro").disabled = total <= 0;
   };
   inputs.forEach(inp => inp.addEventListener("input", actualizarTotal));
@@ -847,6 +907,8 @@ function renderRegistrar(){
     });
     if (!detalle.length) return;
 
+    const { cantidad: totalUnidadBase, nombre: unidadBase } = aUnidadBase(total, art);
+
     const btn = $("#btn-guardar-registro");
     btn.disabled = true; btn.textContent = "Guardando…";
     try{
@@ -860,6 +922,8 @@ function renderRegistrar(){
         descripcion: art.descripcion,
         detalle,
         totalToneladas: total,
+        unidadBase,
+        totalUnidadBase,
       });
       inputs.forEach(inp => inp.value = "");
       actualizarTotal();
@@ -888,7 +952,7 @@ async function renderRecientes(codigo){
     cont.innerHTML = registros.map(r=>`
       <div class="fila-detalle-registro">
         <div>
-          <div>${fmtTon(r.totalToneladas)} Ton</div>
+          <div>${r.totalUnidadBase!=null ? fmtCantidad(r.totalUnidadBase)+" "+r.unidadBase : fmtTon(r.totalToneladas)+" Ton"}</div>
           <div class="meta">${fmtFecha(r.fecha)} · ${r.usuario||""}</div>
         </div>
         <button class="btn-borrar" data-id="${r._fileId}">Anular</button>
@@ -965,19 +1029,25 @@ async function renderInventario(){
 
   const mapa = new Map();
   for (const r of registros){
-    const cur = mapa.get(r.codigo) || { codigo:r.codigo, descripcion:r.descripcion, total:0, n:0 };
-    cur.total += r.totalToneladas || 0;
+    const cur = mapa.get(r.codigo) || { codigo:r.codigo, descripcion:r.descripcion, totalTon:0, n:0 };
+    cur.totalTon += r.totalToneladas || 0;
     cur.n += 1;
     mapa.set(r.codigo, cur);
   }
-  const filas = Array.from(mapa.values()).sort((a,b)=> b.total - a.total);
-  const totalGeneral = filas.reduce((s,f)=>s+f.total,0);
+  // Convertimos cada artículo a SU propia unidad base (Sacos, Unidades, Toneladas…),
+  // no siempre a toneladas — se calcula a partir del maestro de artículos.
+  const filas = Array.from(mapa.values()).map(f => {
+    const articulo = state.articulosPorCodigo?.get(f.codigo);
+    const { cantidad, nombre } = aUnidadBase(f.totalTon, articulo);
+    return { ...f, cantidad, unidad: nombre };
+  }).sort((a,b)=> a.codigo.localeCompare(b.codigo, "es", {numeric:true}));
+  const totalGeneralTon = filas.reduce((s,f)=>s+f.totalTon,0);
 
   cont.innerHTML = `
     <div class="resumen-cabecera">
       <div class="chip-metrica"><div class="num">${filas.length}</div><div class="lbl">Artículos</div></div>
       <div class="chip-metrica"><div class="num">${registros.length}</div><div class="lbl">Registros</div></div>
-      <div class="chip-metrica"><div class="num">${fmtTon(totalGeneral)}</div><div class="lbl">Ton totales</div></div>
+      <div class="chip-metrica"><div class="num">${fmtTon(totalGeneralTon)}</div><div class="lbl">Ton totales</div></div>
     </div>
 
     <div class="campo-busqueda">
@@ -987,7 +1057,7 @@ async function renderInventario(){
     ${filas.length ? `
     <div class="tarjeta" style="overflow-x:auto;">
       <table class="tabla-inventario" id="tabla-inventario">
-        <thead><tr><th>Código</th><th>Descripción</th><th class="num">Reg.</th><th class="num">Ton</th></tr></thead>
+        <thead><tr><th>Código</th><th>Descripción</th><th class="num">Reg.</th><th class="num">Cantidad</th><th class="num">Ton</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -1000,7 +1070,7 @@ async function renderInventario(){
     if (!tbody) return;
     const f = filtro ? filas.filter(x => x.codigo.toLowerCase().includes(filtro) || x.descripcion.toLowerCase().includes(filtro)) : filas;
     tbody.innerHTML = f.map(x=>`
-      <tr><td>${x.codigo}</td><td>${x.descripcion}</td><td class="num">${x.n}</td><td class="num">${fmtTon(x.total)}</td></tr>
+      <tr><td>${x.codigo}</td><td>${x.descripcion}</td><td class="num">${x.n}</td><td class="num">${fmtCantidad(x.cantidad)} ${x.unidad}</td><td class="num">${fmtTon(x.totalTon)}</td></tr>
     `).join("");
   }
   pintarTabla("");
@@ -1008,8 +1078,19 @@ async function renderInventario(){
 
   $("#btn-exportar")?.addEventListener("click", () => {
     const wb = XLSX.utils.book_new();
+    const infoActual = state.inventariosInfo?.[state.inventarioActual];
+    const wsInfo = XLSX.utils.aoa_to_sheet([
+      ["Almacén", state.almacenActual],
+      ["Inventario", state.inventarioActual],
+      ["Fecha y hora del recuento", infoActual?.fecha ? fmtFecha(infoActual.fecha) : ""],
+      ["Creado por", infoActual?.creadoPor || ""],
+      ["Exportado el", fmtFecha(new Date().toISOString())],
+    ]);
+    XLSX.utils.book_append_sheet(wb, wsInfo, "Info");
+
     const wsResumen = XLSX.utils.json_to_sheet(filas.map(f=>({
-      Codigo:f.codigo, Descripcion:f.descripcion, Registros:f.n, Toneladas:Number(f.total.toFixed(3)),
+      Codigo:f.codigo, Descripcion:f.descripcion, Registros:f.n,
+      Unidad:f.unidad, Cantidad:Number(f.cantidad.toFixed(3)), Toneladas:Number(f.totalTon.toFixed(3)),
     })));
     XLSX.utils.book_append_sheet(wb, wsResumen, "Resumen");
 
@@ -1031,8 +1112,20 @@ async function renderInventario(){
 function renderVista(){
   $("#tab-registrar").classList.toggle("activa", state.vista === "registrar");
   $("#tab-inventario").classList.toggle("activa", state.vista === "inventario");
+  actualizarInfoInventarioActual();
   if (state.vista === "registrar") renderRegistrar();
   else renderInventario();
+}
+
+function actualizarInfoInventarioActual(){
+  const el = $("#info-inventario-actual");
+  const info = state.inventariosInfo?.[state.inventarioActual];
+  if (state.inventarioActual && info?.fecha){
+    el.style.display = "flex";
+    el.innerHTML = `<span class="punto ok"></span> Recuento del ${fmtFecha(info.fecha)}${info.creadoPor ? " · creado por " + info.creadoPor : ""}`;
+  } else {
+    el.style.display = "none";
+  }
 }
 
 document.addEventListener("DOMContentLoaded", async () => {
@@ -1114,13 +1207,21 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   $("#btn-crear-inventario").addEventListener("click", async ()=>{
     const nombre = sanitizeNombre($("#input-nuevo-inventario").value);
+    const fechaInput = $("#input-fecha-inventario").value;
     if (!nombre) return;
     const btn = $("#btn-crear-inventario");
     btn.disabled = true; btn.textContent = "Creando…";
     try{
-      await ensureFolder(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`);
+      const carpeta = `${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`;
+      await ensureFolder(carpeta);
+      await guardarInfoInventario(carpeta, {
+        fecha: fechaInput ? new Date(fechaInput).toISOString() : new Date().toISOString(),
+        creadoPor: state.account.name || state.account.username,
+        creadoEn: new Date().toISOString(),
+      });
       $("#panel-nuevo-inventario").style.display = "none";
       $("#input-nuevo-inventario").value = "";
+      $("#input-fecha-inventario").value = "";
       await cargarInventarios();
       $("#sel-inventario").value = nombre;
       state.inventarioActual = nombre;
