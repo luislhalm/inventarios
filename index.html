@@ -9,8 +9,8 @@
 <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent">
 <title>Inventarios · CAPA</title>
 
-<script src="https://alcdn.msauth.net/browser/3.18.0/js/msal-browser.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+<script src="https://alcdn.msauth.net/browser/3.18.0/js/msal-browser.min.js" onerror="window.__msalFalló=true"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js" onerror="window.__xlsxFalló=true"></script>
 
 <style>
 /* ============================================================
@@ -419,6 +419,10 @@ function initMsal(){
 
 async function login(){
   avisoLogin("");
+  if (window.__msalFalló || typeof msal === "undefined" || !msalInstance){
+    avisoLogin("La librería de inicio de sesión no está disponible (revisa tu conexión, o si un bloqueador de anuncios impide cargar alcdn.msauth.net). Recarga la página e inténtalo de nuevo.");
+    return;
+  }
   if (CONFIG.CLIENT_ID.startsWith("PON_AQUI")){
     avisoLogin("Esta app todavía no está configurada: falta el CLIENT_ID / TENANT_ID en el archivo. Revisa la sección CONFIG al principio del código.");
     return;
@@ -928,10 +932,24 @@ function renderVista(){
 }
 
 document.addEventListener("DOMContentLoaded", () => {
-  initMsal();
-
+  // Registramos TODOS los listeners primero, pase lo que pase con MSAL/XLSX,
+  // para que el botón de login nunca se quede "muerto" en silencio.
   $("#btn-login").addEventListener("click", login);
   $("#btn-logout").addEventListener("click", logout);
+
+  if (window.__msalFalló){
+    avisoLogin("No se ha podido cargar la librería de inicio de sesión de Microsoft (msal-browser.js). Suele deberse a un bloqueador de anuncios/privacidad, una red de empresa que bloquea alcdn.msauth.net, o falta de conexión. Prueba en otra red o desactiva el bloqueador para este sitio.");
+  } else {
+    try{
+      initMsal();
+    }catch(e){
+      console.error(e);
+      avisoLogin("Error inicializando el inicio de sesión: " + e.message);
+    }
+  }
+  if (window.__xlsxFalló){
+    avisoLogin("Aviso: no se ha podido cargar la librería de Excel (xlsx.js), la exportación a Excel no funcionará, pero el resto de la app sí debería.", "info");
+  }
 
   document.querySelectorAll("nav.tabs button").forEach(btn=>{
     btn.addEventListener("click", ()=>{
