@@ -430,7 +430,7 @@ function avisoLogin(texto, tipo){
 /* ============================================================
    AUTENTICACIÓN (MSAL)
    ============================================================ */
-function initMsal(){
+async function initMsal(){
   msalInstance = new msal.PublicClientApplication({
     auth: {
       clientId: CONFIG.CLIENT_ID,
@@ -439,7 +439,18 @@ function initMsal(){
     },
     cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false },
   });
-  return msalInstance.initialize();
+  await msalInstance.initialize();
+  // Si venimos de vuelta de un login por redirección, esto recoge la respuesta.
+  const respuesta = await msalInstance.handleRedirectPromise().catch(e=>{
+    console.error(e);
+    avisoLogin("No se pudo completar el inicio de sesión (" + (e.errorCode||e.message) + ").");
+    return null;
+  });
+  if (respuesta && respuesta.account){
+    msalInstance.setActiveAccount(respuesta.account);
+    return respuesta.account;
+  }
+  return null;
 }
 
 async function login(){
@@ -453,18 +464,19 @@ async function login(){
     return;
   }
   try{
-    const res = await msalInstance.loginPopup({ scopes: GRAPH_SCOPES });
-    msalInstance.setActiveAccount(res.account);
-    await arrancarApp(res.account);
+    // Usamos redirección en vez de ventana emergente: es lo fiable en Safari/iOS,
+    // donde las cookies de terceros rompen la comunicación con el popup.
+    await msalInstance.loginRedirect({ scopes: GRAPH_SCOPES });
+    // A partir de aquí el navegador sale de la página; el resultado se recoge
+    // en initMsal() -> handleRedirectPromise() al volver.
   }catch(e){
     console.error(e);
-    avisoLogin("No se pudo iniciar sesión (" + (e.errorCode||e.message) + "). Comprueba que permites ventanas emergentes para este sitio.");
+    avisoLogin("No se pudo iniciar sesión (" + (e.errorCode||e.message) + ").");
   }
 }
 
 async function logout(){
-  await msalInstance.logoutPopup().catch(()=>{});
-  window.location.reload();
+  await msalInstance.logoutRedirect().catch(()=>{ window.location.reload(); });
 }
 
 async function getToken(){
@@ -474,8 +486,9 @@ async function getToken(){
     const res = await msalInstance.acquireTokenSilent({ scopes: GRAPH_SCOPES, account });
     return res.accessToken;
   }catch(e){
-    const res = await msalInstance.acquireTokenPopup({ scopes: GRAPH_SCOPES });
-    return res.accessToken;
+    await msalInstance.acquireTokenRedirect({ scopes: GRAPH_SCOPES });
+    // Igual que en login: el navegador redirige y vuelve, no hay valor que devolver aquí.
+    throw new Error("Redirigiendo para renovar el permiso de acceso…");
   }
 }
 
@@ -967,11 +980,15 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   await window.__cargaLibs; // espera a que terminen los intentos de carga de librerías
 
+  let cuentaRedirect = null;
   if (window.__msalFalló){
     avisoLogin("No se ha podido cargar la librería de inicio de sesión de Microsoft desde ninguna de las fuentes probadas (jsdelivr, unpkg, Microsoft). Es casi seguro que tu red bloquea estos dominios de CDN — pídele a tu departamento de TI que permita cdn.jsdelivr.net y unpkg.com, o prueba desde otra red (por ejemplo datos móviles) para confirmarlo.");
   } else {
     try{
-      await initMsal();
+      cuentaRedirect = await initMsal();
+      if (cuentaRedirect){
+        await arrancarApp(cuentaRedirect);
+      }
     }catch(e){
       console.error(e);
       avisoLogin("Error inicializando el inicio de sesión: " + e.message);
@@ -1039,7 +1056,8 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // Intenta reanudar sesión si ya había una cuenta activa en este navegador
-  if (msalInstance){
+  // (y no acabamos de volver ya de un login por redirección, que ya se gestionó arriba)
+  if (msalInstance && !cuentaRedirect){
     const cuentas = msalInstance.getAllAccounts();
     if (cuentas.length){
       msalInstance.setActiveAccount(cuentas[0]);
