@@ -312,7 +312,7 @@ nav.tabs svg{width:22px;height:22px;}
       <button id="btn-crear-almacen">Crear</button>
     </div>
     <div id="panel-nuevo-inventario" style="display:none" class="crear-inline">
-      <input id="input-nuevo-inventario" placeholder="Ej. 2026-08">
+      <input id="input-nuevo-inventario" type="month">
       <button id="btn-crear-inventario">Crear</button>
     </div>
 
@@ -425,6 +425,26 @@ function setEstado(texto, tipo){
 }
 function avisoLogin(texto, tipo){
   $("#login-aviso").innerHTML = texto ? `<div class="aviso ${tipo||'error'}" style="margin-top:10px;max-width:320px;">${texto}</div>` : "";
+}
+function abrirCreadorAlmacen(){
+  $("#panel-nuevo-almacen").style.display = "flex";
+  $("#panel-nuevo-almacen").scrollIntoView({behavior:"smooth", block:"center"});
+  $("#input-nuevo-almacen").focus();
+}
+function abrirSelectorAlmacen(){
+  $("#sel-almacen").scrollIntoView({behavior:"smooth", block:"center"});
+  $("#sel-almacen").focus();
+}
+function abrirCreadorInventario(){
+  if (!state.almacenActual) return abrirCreadorAlmacen();
+  $("#panel-nuevo-inventario").style.display = "flex";
+  if (!$("#input-nuevo-inventario").value) $("#input-nuevo-inventario").value = mesActual();
+  $("#panel-nuevo-inventario").scrollIntoView({behavior:"smooth", block:"center"});
+  $("#input-nuevo-inventario").focus();
+}
+function abrirSelectorInventario(){
+  $("#sel-inventario").scrollIntoView({behavior:"smooth", block:"center"});
+  $("#sel-inventario").focus();
 }
 
 /* ============================================================
@@ -688,8 +708,18 @@ async function cargarAlmacenes(){
   if (state.almacenes.length){
     state.almacenActual = state.almacenes[0];
     sel.value = state.almacenActual;
+    $("#panel-nuevo-almacen").style.display = "none";
+    await cargarInventarios();
+  } else {
+    // No hay ningún almacén todavía: mostramos directamente el formulario de creación,
+    // porque el <select> no dispara "change" cuando solo tiene esta única opción.
+    state.almacenActual = "";
+    sel.value = "__nuevo__";
+    $("#panel-nuevo-almacen").style.display = "flex";
+    $("#sel-inventario").innerHTML = "";
+    $("#panel-nuevo-inventario").style.display = "none";
+    renderVista();
   }
-  await cargarInventarios();
 }
 
 async function cargarInventarios(){
@@ -701,8 +731,13 @@ async function cargarInventarios(){
   if (state.inventarios.length){
     state.inventarioActual = state.inventarios[0];
     sel.value = state.inventarioActual;
+    $("#panel-nuevo-inventario").style.display = "none";
   } else {
+    // Igual que con almacenes: sin inventarios previos, mostramos el formulario directamente.
     state.inventarioActual = "";
+    sel.value = "__nuevo__";
+    $("#input-nuevo-inventario").value = mesActual();
+    $("#panel-nuevo-inventario").style.display = "flex";
   }
   renderVista();
 }
@@ -713,8 +748,22 @@ async function cargarInventarios(){
 function renderRegistrar(){
   const cont = $("#contenido");
 
-  if (!state.almacenActual || !state.inventarioActual){
-    cont.innerHTML = `<div class="aviso info">Elige o crea un almacén y un inventario arriba para empezar a registrar mercancía.</div>`;
+  if (!state.almacenActual){
+    cont.innerHTML = `
+      <div class="aviso info">Todavía no hay ningún almacén creado.</div>
+      <button class="btn-primario" id="btn-cta-crear-almacen">+ Crear almacén</button>`;
+    $("#btn-cta-crear-almacen").addEventListener("click", abrirCreadorAlmacen);
+    return;
+  }
+  if (!state.inventarioActual){
+    cont.innerHTML = `
+      <div class="aviso info">Elige o crea un inventario (recuento) para "${state.almacenActual}".</div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${state.inventarios.length ? '<button class="btn-secundario" id="btn-cta-abrir-inventario">Abrir inventario existente</button>' : ''}
+        <button class="btn-primario" id="btn-cta-crear-inventario">+ Nuevo inventario</button>
+      </div>`;
+    $("#btn-cta-abrir-inventario")?.addEventListener("click", abrirSelectorInventario);
+    $("#btn-cta-crear-inventario").addEventListener("click", abrirCreadorInventario);
     return;
   }
 
@@ -886,8 +935,22 @@ function renderListaArticulos(q){
 async function renderInventario(){
   const cont = $("#contenido");
 
-  if (!state.almacenActual || !state.inventarioActual){
-    cont.innerHTML = `<div class="aviso info">Elige un almacén y un inventario arriba para ver su resumen.</div>`;
+  if (!state.almacenActual){
+    cont.innerHTML = `
+      <div class="aviso info">Todavía no hay ningún almacén creado.</div>
+      <button class="btn-primario" id="btn-cta-crear-almacen">+ Crear almacén</button>`;
+    $("#btn-cta-crear-almacen").addEventListener("click", abrirCreadorAlmacen);
+    return;
+  }
+  if (!state.inventarioActual){
+    cont.innerHTML = `
+      <div class="aviso info">Elige o crea un inventario (recuento) para ver su resumen en "${state.almacenActual}".</div>
+      <div style="display:flex;flex-direction:column;gap:10px;">
+        ${state.inventarios.length ? '<button class="btn-secundario" id="btn-cta-abrir-inventario">Abrir inventario existente</button>' : ''}
+        <button class="btn-primario" id="btn-cta-crear-inventario">+ Nuevo inventario</button>
+      </div>`;
+    $("#btn-cta-abrir-inventario")?.addEventListener("click", abrirSelectorInventario);
+    $("#btn-cta-crear-inventario").addEventListener("click", abrirCreadorInventario);
     return;
   }
 
@@ -1008,9 +1071,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   $("#sel-almacen").addEventListener("change", async (e)=>{
     if (e.target.value === "__nuevo__"){
-      $("#panel-nuevo-almacen").style.display = "flex";
+      abrirCreadorAlmacen();
       e.target.value = state.almacenActual || "";
-      $("#input-nuevo-almacen").focus();
       return;
     }
     state.almacenActual = e.target.value;
@@ -1020,10 +1082,8 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   $("#sel-inventario").addEventListener("change", (e)=>{
     if (e.target.value === "__nuevo__"){
-      $("#panel-nuevo-inventario").style.display = "flex";
-      $("#input-nuevo-inventario").value = mesActual();
+      abrirCreadorInventario();
       e.target.value = state.inventarioActual || "";
-      $("#input-nuevo-inventario").focus();
       return;
     }
     state.inventarioActual = e.target.value;
@@ -1034,25 +1094,43 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#btn-crear-almacen").addEventListener("click", async ()=>{
     const nombre = sanitizeNombre($("#input-nuevo-almacen").value);
     if (!nombre) return;
-    await ensureFolder(`${CONFIG.ROOT_FOLDER}/${nombre}`);
-    $("#panel-nuevo-almacen").style.display = "none";
-    $("#input-nuevo-almacen").value = "";
-    await cargarAlmacenes();
-    $("#sel-almacen").value = nombre;
-    state.almacenActual = nombre;
-    await cargarInventarios();
+    const btn = $("#btn-crear-almacen");
+    btn.disabled = true; btn.textContent = "Creando…";
+    try{
+      await ensureFolder(`${CONFIG.ROOT_FOLDER}/${nombre}`);
+      $("#panel-nuevo-almacen").style.display = "none";
+      $("#input-nuevo-almacen").value = "";
+      await cargarAlmacenes();
+      $("#sel-almacen").value = nombre;
+      state.almacenActual = nombre;
+      await cargarInventarios();
+    }catch(e){
+      console.error(e);
+      alert("No se pudo crear el almacén: " + e.message);
+    }finally{
+      btn.disabled = false; btn.textContent = "Crear";
+    }
   });
 
   $("#btn-crear-inventario").addEventListener("click", async ()=>{
     const nombre = sanitizeNombre($("#input-nuevo-inventario").value);
     if (!nombre) return;
-    await ensureFolder(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`);
-    $("#panel-nuevo-inventario").style.display = "none";
-    $("#input-nuevo-inventario").value = "";
-    await cargarInventarios();
-    $("#sel-inventario").value = nombre;
-    state.inventarioActual = nombre;
-    renderVista();
+    const btn = $("#btn-crear-inventario");
+    btn.disabled = true; btn.textContent = "Creando…";
+    try{
+      await ensureFolder(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`);
+      $("#panel-nuevo-inventario").style.display = "none";
+      $("#input-nuevo-inventario").value = "";
+      await cargarInventarios();
+      $("#sel-inventario").value = nombre;
+      state.inventarioActual = nombre;
+      renderVista();
+    }catch(e){
+      console.error(e);
+      alert("No se pudo crear el inventario: " + e.message);
+    }finally{
+      btn.disabled = false; btn.textContent = "Crear";
+    }
   });
 
   // Intenta reanudar sesión si ya había una cuenta activa en este navegador
