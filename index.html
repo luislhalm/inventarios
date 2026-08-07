@@ -439,6 +439,7 @@ function initMsal(){
     },
     cache: { cacheLocation: "sessionStorage", storeAuthStateInCookie: false },
   });
+  return msalInstance.initialize();
 }
 
 async function login(){
@@ -970,7 +971,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     avisoLogin("No se ha podido cargar la librería de inicio de sesión de Microsoft desde ninguna de las fuentes probadas (jsdelivr, unpkg, Microsoft). Es casi seguro que tu red bloquea estos dominios de CDN — pídele a tu departamento de TI que permita cdn.jsdelivr.net y unpkg.com, o prueba desde otra red (por ejemplo datos móviles) para confirmarlo.");
   } else {
     try{
-      initMsal();
+      await initMsal();
     }catch(e){
       console.error(e);
       avisoLogin("Error inicializando el inicio de sesión: " + e.message);
@@ -1038,10 +1039,12 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   // Intenta reanudar sesión si ya había una cuenta activa en este navegador
-  const cuentas = msalInstance.getAllAccounts();
-  if (cuentas.length){
-    msalInstance.setActiveAccount(cuentas[0]);
-    arrancarApp(cuentas[0]);
+  if (msalInstance){
+    const cuentas = msalInstance.getAllAccounts();
+    if (cuentas.length){
+      msalInstance.setActiveAccount(cuentas[0]);
+      arrancarApp(cuentas[0]);
+    }
   }
 });
 </script>
