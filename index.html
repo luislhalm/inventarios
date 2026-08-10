@@ -246,6 +246,7 @@ table.tabla-inventario th{
 table.tabla-inventario td{padding:10px 8px;border-bottom:1px solid var(--border);}
 table.tabla-inventario td.num{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;}
 table.tabla-inventario tr:active{background:#FAF6F0;}
+table.tabla-inventario tbody tr{cursor:pointer;}
 
 .fila-detalle-registro{
   display:flex;justify-content:space-between;align-items:center;gap:8px;
@@ -454,14 +455,30 @@ function fmtCantidad(n){
 }
 // Convierte un total en toneladas a la unidad base propia del artículo (Sacos, Unidades, Toneladas…)
 function aUnidadBase(totalToneladas, articulo){
+  const objetivo = (articulo?.unidadSistema || "").trim();
   const base = articulo?.unidades?.[0];
-  // El nombre a mostrar viene de la columna "unidad" del maestro (la que dice en qué
-  // unidad cuenta el sistema); si no está rellena, usamos el nombre de la unidad base.
-  const nombreMostrar = articulo?.unidadSistema || base?.nombre || "Cantidad";
-  if (!base || !base.factor){
-    return { cantidad: totalToneladas, nombre: nombreMostrar };
+
+  if (objetivo){
+    // ¿La columna "unidad" pide directamente toneladas/peso?
+    if (/^t(on|n)\b|tonelad/i.test(objetivo)){
+      return { cantidad: totalToneladas, nombre: objetivo };
+    }
+    // ¿Coincide con alguna de las unidades propias del artículo (Sacos, Cajas, Pallet…)?
+    const coincide = articulo.unidades?.find(u =>
+      u.nombre.toLowerCase() === objetivo.toLowerCase()
+      || u.nombre.toLowerCase().includes(objetivo.toLowerCase())
+      || objetivo.toLowerCase().includes(u.nombre.toLowerCase())
+    );
+    if (coincide && coincide.factor){
+      return { cantidad: totalToneladas / coincide.factor, nombre: objetivo };
+    }
   }
-  return { cantidad: totalToneladas / base.factor, nombre: nombreMostrar };
+
+  // Sin columna "unidad" aprovechable: usamos la unidad base tradicional (Descrip_Unidad/Conv_unidad)
+  if (!base || !base.factor){
+    return { cantidad: totalToneladas, nombre: objetivo || "Cantidad" };
+  }
+  return { cantidad: totalToneladas / base.factor, nombre: objetivo || base.nombre };
 }
 function fmtFecha(iso){
   const d = new Date(iso);
@@ -1179,6 +1196,7 @@ async function renderInventario(){
         <tbody></tbody>
       </table>
     </div>
+    <div style="font-size:.75rem;color:var(--texto-claro);margin:-6px 0 12px;">Toca un artículo para ver o editar sus registros.</div>
     <button class="btn-secundario" id="btn-exportar">Exportar a Excel</button>
     ` : `<div class="aviso info">Todavía no hay registros en este inventario.</div>`}
   `;
@@ -1188,8 +1206,18 @@ async function renderInventario(){
     if (!tbody) return;
     const f = filtro ? filas.filter(x => x.codigo.toLowerCase().includes(filtro) || x.descripcion.toLowerCase().includes(filtro)) : filas;
     tbody.innerHTML = f.map(x=>`
-      <tr><td>${x.codigo}</td><td>${x.descripcion}</td><td class="num">${x.n}</td><td class="num">${fmtCantidad(x.cantidad)} ${x.unidad}</td></tr>
+      <tr data-codigo="${x.codigo}"><td>${x.codigo}</td><td>${x.descripcion}</td><td class="num">${x.n}</td><td class="num">${fmtCantidad(x.cantidad)} ${x.unidad}</td></tr>
     `).join("");
+    tbody.querySelectorAll("tr").forEach(tr=>{
+      tr.addEventListener("click", ()=>{
+        const articulo = state.articulosPorCodigo?.get(tr.dataset.codigo);
+        if (!articulo) return;
+        state.articuloSeleccionado = articulo;
+        state.editandoId = null;
+        state.vista = "registrar";
+        renderVista();
+      });
+    });
   }
   pintarTabla("");
   $("#filtro-inventario")?.addEventListener("input", e => pintarTabla(e.target.value.trim().toLowerCase()));
