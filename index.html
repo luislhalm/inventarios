@@ -405,6 +405,8 @@ const COLS = {
   convEnv1: "Conv_env_1",
   unidadEnv2: "Descrip_Env2",
   convEnv2: "Conv_env_2",
+  // Columna añadida al maestro: la unidad en la que el sistema debe mostrar el total del artículo
+  unidadSistema: "unidad",
 };
 
 const GRAPH_SCOPES = ["Sites.ReadWrite.All", "Files.ReadWrite.All", "User.Read"];
@@ -425,6 +427,7 @@ const state = {
   inventarioActual: "",
   vista: "registrar",
   articuloSeleccionado: null,
+  editandoId: null,
   registrosCache: [],
   registrosCacheKey: "",
 };
@@ -452,10 +455,13 @@ function fmtCantidad(n){
 // Convierte un total en toneladas a la unidad base propia del artículo (Sacos, Unidades, Toneladas…)
 function aUnidadBase(totalToneladas, articulo){
   const base = articulo?.unidades?.[0];
+  // El nombre a mostrar viene de la columna "unidad" del maestro (la que dice en qué
+  // unidad cuenta el sistema); si no está rellena, usamos el nombre de la unidad base.
+  const nombreMostrar = articulo?.unidadSistema || base?.nombre || "Cantidad";
   if (!base || !base.factor){
-    return { cantidad: totalToneladas, nombre: "Ton" };
+    return { cantidad: totalToneladas, nombre: nombreMostrar };
   }
-  return { cantidad: totalToneladas / base.factor, nombre: base.nombre };
+  return { cantidad: totalToneladas / base.factor, nombre: nombreMostrar };
 }
 function fmtFecha(iso){
   const d = new Date(iso);
@@ -665,7 +671,8 @@ function normalizarArticulo(fila){
     const factor = parseNum(get(factorCol));
     if (nombre) unidades.push({ nombre, factor });
   }
-  return { codigo, descripcion, unidades };
+  const unidadSistema = String(get(COLS.unidadSistema) ?? "").trim();
+  return { codigo, descripcion, unidades, unidadSistema };
 }
 
 async function loadMaster(){
@@ -708,6 +715,16 @@ async function guardarRegistro(registro){
   const sufijo = Math.random().toString(36).slice(2,7);
   const nombreArchivo = `${Date.now()}_${sufijo}_${sanitizeNombre(registro.codigo)}.json`;
   await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/${nombreArchivo}:/content`, {
+    method:"PUT",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(registro),
+  });
+  state.registrosCacheKey = ""; // invalida caché
+}
+
+// Sobrescribe el contenido de un registro ya existente (edición), en vez de crear uno nuevo.
+async function actualizarRegistro(fileId, registro){
+  await graphFetch(`/drives/${state.driveId}/items/${fileId}/content`, {
     method:"PUT",
     headers:{"Content-Type":"application/json"},
     body: JSON.stringify(registro),
@@ -873,6 +890,11 @@ function renderRegistrar(){
         <button class="btn-cambiar" id="btn-cambiar-articulo">Cambiar</button>
       </div>
 
+      <div class="aviso info" id="aviso-editando" style="display:none;align-items:center;justify-content:space-between;gap:10px;">
+        <span>Editando un registro existente</span>
+        <button class="btn-texto" id="btn-cancelar-edicion" style="padding:2px;">Cancelar edición</button>
+      </div>
+
       <div class="fila-extra">
         <div class="campo-extra">
           <label for="sel-ubicacion">Ubicación</label>
@@ -905,7 +927,7 @@ function renderRegistrar(){
 
       <div class="resumen-total">
         <span class="etiqueta">Total registro</span>
-        <span class="valor" id="total-toneladas">0 ${art.unidades[0]?.nombre || "Ton"}</span>
+        <span class="valor" id="total-toneladas">0 ${art.unidadSistema || art.unidades[0]?.nombre || "Cantidad"}</span>
       </div>
 
       <button class="btn-primario" id="btn-guardar-registro" disabled>Guardar registro</button>
@@ -917,8 +939,11 @@ function renderRegistrar(){
     </div>
   `;
 
+  state.editandoId = null;
+
   $("#btn-cambiar-articulo").addEventListener("click", ()=>{
     state.articuloSeleccionado = null;
+    state.editandoId = null;
     renderVista();
   });
 
@@ -942,6 +967,31 @@ function renderRegistrar(){
     });
   });
 
+  function salirModoEdicion(){
+    state.editandoId = null;
+    $("#aviso-editando").style.display = "none";
+    inputs.forEach(inp => inp.value = "");
+    $("#input-caducidad").value = "";
+    $("#sel-ubicacion").value = "00";
+    actualizarTotal();
+    $("#btn-guardar-registro").textContent = "Guardar registro";
+  }
+  $("#btn-cancelar-edicion").addEventListener("click", salirModoEdicion);
+
+  function entrarModoEdicion(r){
+    state.editandoId = r._fileId;
+    art.unidades.forEach((u,i)=>{
+      const det = r.detalle.find(d => d.unidad === u.nombre);
+      inputs[i].value = det ? String(det.cantidad).replace(".", ",") : "";
+    });
+    $("#sel-ubicacion").value = r.ubicacion || "00";
+    $("#input-caducidad").value = r.fechaCaducidad || "";
+    actualizarTotal();
+    $("#aviso-editando").style.display = "flex";
+    $("#btn-guardar-registro").textContent = "Guardar cambios";
+    $("#btn-guardar-registro").scrollIntoView({behavior:"smooth", block:"center"});
+  }
+
   $("#btn-guardar-registro").addEventListener("click", async () => {
     const detalle = [];
     let total = 0;
@@ -959,12 +1009,13 @@ function renderRegistrar(){
     const { cantidad: totalUnidadBase, nombre: unidadBase } = aUnidadBase(total, art);
     const ubicacion = $("#sel-ubicacion").value;
     const fechaCaducidad = $("#input-caducidad").value || null;
+    const editando = !!state.editandoId;
 
     const btn = $("#btn-guardar-registro");
-    btn.disabled = true; btn.textContent = "Guardando…";
+    btn.disabled = true; btn.textContent = editando ? "Guardando cambios…" : "Guardando…";
     try{
-      await guardarRegistro({
-        fecha: new Date().toISOString(),
+      const registro = {
+        fecha: editando ? (await cargarRegistros()).find(r=>r._fileId===state.editandoId)?.fecha || new Date().toISOString() : new Date().toISOString(),
         usuario: state.account.name || state.account.username,
         usuarioEmail: state.account.username,
         almacen: state.almacenActual,
@@ -977,25 +1028,28 @@ function renderRegistrar(){
         totalToneladas: total,
         unidadBase,
         totalUnidadBase,
-      });
-      inputs.forEach(inp => inp.value = "");
-      $("#input-caducidad").value = "";
-      $("#sel-ubicacion").value = "00";
-      actualizarTotal();
-      await renderRecientes(art.codigo);
+      };
+      if (editando){
+        registro.editadoEn = new Date().toISOString();
+        await actualizarRegistro(state.editandoId, registro);
+      } else {
+        await guardarRegistro(registro);
+      }
+      salirModoEdicion();
+      await renderRecientes(art.codigo, entrarModoEdicion);
       btn.textContent = "✓ Guardado";
       setTimeout(()=>{ btn.textContent = "Guardar registro"; btn.disabled = true; }, 900);
     }catch(e){
       console.error(e);
       alert("No se pudo guardar el registro: " + e.message);
-      btn.disabled = false; btn.textContent = "Guardar registro";
+      btn.disabled = false; btn.textContent = editando ? "Guardar cambios" : "Guardar registro";
     }
   });
 
-  renderRecientes(art.codigo);
+  renderRecientes(art.codigo, entrarModoEdicion);
 }
 
-async function renderRecientes(codigo){
+async function renderRecientes(codigo, onEditar){
   const cont = $("#lista-recientes");
   if (!cont) return;
   try{
@@ -1008,15 +1062,26 @@ async function renderRecientes(codigo){
       <div class="fila-detalle-registro">
         <div>
           <div>${r.totalUnidadBase!=null ? fmtCantidad(r.totalUnidadBase)+" "+r.unidadBase : fmtTon(r.totalToneladas)+" Ton"}${r.ubicacion ? ` · Ubic. ${r.ubicacion}` : ""}</div>
-          <div class="meta">${fmtFecha(r.fecha)} · ${r.usuario||""}${r.fechaCaducidad ? " · Caduca " + r.fechaCaducidad : ""}</div>
+          <div class="meta">${fmtFecha(r.fecha)} · ${r.usuario||""}${r.fechaCaducidad ? " · Caduca " + r.fechaCaducidad : ""}${r.editadoEn ? " · editado" : ""}</div>
         </div>
-        <button class="btn-borrar" data-id="${r._fileId}">Anular</button>
+        <div style="display:flex;gap:4px;flex-shrink:0;">
+          <button class="btn-texto" style="padding:4px 6px;font-size:.72rem;" data-editar-id="${r._fileId}">Editar</button>
+          <button class="btn-borrar" data-id="${r._fileId}">Anular</button>
+        </div>
       </div>`).join("");
+    if (onEditar){
+      cont.querySelectorAll("[data-editar-id]").forEach(b=>{
+        b.addEventListener("click", ()=>{
+          const r = registros.find(x=>x._fileId === b.dataset.editarId);
+          if (r) onEditar(r);
+        });
+      });
+    }
     cont.querySelectorAll(".btn-borrar").forEach(b=>{
       b.addEventListener("click", async ()=>{
         if (!confirm("¿Anular este registro? No se puede deshacer.")) return;
         await borrarRegistro(b.dataset.id);
-        await renderRecientes(codigo);
+        await renderRecientes(codigo, onEditar);
       });
     });
   }catch(e){
@@ -1096,13 +1161,11 @@ async function renderInventario(){
     const { cantidad, nombre } = aUnidadBase(f.totalTon, articulo);
     return { ...f, cantidad, unidad: nombre };
   }).sort((a,b)=> a.codigo.localeCompare(b.codigo, "es", {numeric:true}));
-  const totalGeneralTon = filas.reduce((s,f)=>s+f.totalTon,0);
 
   cont.innerHTML = `
     <div class="resumen-cabecera">
       <div class="chip-metrica"><div class="num">${filas.length}</div><div class="lbl">Artículos</div></div>
       <div class="chip-metrica"><div class="num">${registros.length}</div><div class="lbl">Registros</div></div>
-      <div class="chip-metrica"><div class="num">${fmtTon(totalGeneralTon)}</div><div class="lbl">Ton totales</div></div>
     </div>
 
     <div class="campo-busqueda">
@@ -1112,7 +1175,7 @@ async function renderInventario(){
     ${filas.length ? `
     <div class="tarjeta" style="overflow-x:auto;">
       <table class="tabla-inventario" id="tabla-inventario">
-        <thead><tr><th>Código</th><th>Descripción</th><th class="num">Reg.</th><th class="num">Cantidad</th><th class="num">Ton</th></tr></thead>
+        <thead><tr><th>Código</th><th>Descripción</th><th class="num">Reg.</th><th class="num">Cantidad total</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -1125,7 +1188,7 @@ async function renderInventario(){
     if (!tbody) return;
     const f = filtro ? filas.filter(x => x.codigo.toLowerCase().includes(filtro) || x.descripcion.toLowerCase().includes(filtro)) : filas;
     tbody.innerHTML = f.map(x=>`
-      <tr><td>${x.codigo}</td><td>${x.descripcion}</td><td class="num">${x.n}</td><td class="num">${fmtCantidad(x.cantidad)} ${x.unidad}</td><td class="num">${fmtTon(x.totalTon)}</td></tr>
+      <tr><td>${x.codigo}</td><td>${x.descripcion}</td><td class="num">${x.n}</td><td class="num">${fmtCantidad(x.cantidad)} ${x.unidad}</td></tr>
     `).join("");
   }
   pintarTabla("");
@@ -1145,7 +1208,7 @@ async function renderInventario(){
 
     const wsResumen = XLSX.utils.json_to_sheet(filas.map(f=>({
       Codigo:f.codigo, Descripcion:f.descripcion, Registros:f.n,
-      Unidad:f.unidad, Cantidad:Number(f.cantidad.toFixed(3)), Toneladas:Number(f.totalTon.toFixed(3)),
+      Unidad:f.unidad, "Cantidad total":Number(f.cantidad.toFixed(3)),
     })));
     XLSX.utils.book_append_sheet(wb, wsResumen, "Resumen");
 
@@ -1214,6 +1277,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     btn.addEventListener("click", ()=>{
       state.vista = btn.dataset.vista;
       state.articuloSeleccionado = null;
+    state.editandoId = null;
       renderVista();
     });
   });
@@ -1226,6 +1290,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     state.almacenActual = e.target.value;
     state.articuloSeleccionado = null;
+    state.editandoId = null;
     await cargarInventarios();
   });
 
@@ -1237,6 +1302,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     }
     state.inventarioActual = e.target.value;
     state.articuloSeleccionado = null;
+    state.editandoId = null;
     renderVista();
   });
 
