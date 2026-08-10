@@ -188,6 +188,26 @@ main{flex:1;padding:16px;padding-bottom:32px;}
 }
 .fila-unidad input:focus{outline:none;border-color:var(--capa-naranja);}
 
+.stepper-cantidad{display:flex;align-items:center;gap:6px;}
+.stepper-cantidad input{width:78px;}
+.btn-stepper{
+  width:36px;height:36px;flex-shrink:0;border-radius:10px;border:1.5px solid var(--border);
+  background:var(--surface);color:var(--capa-negro);font-size:1.2rem;font-weight:700;
+  display:flex;align-items:center;justify-content:center;line-height:1;
+}
+.btn-stepper:active{background:var(--capa-naranja);color:#fff;border-color:var(--capa-naranja);}
+
+.fila-extra{display:flex;gap:10px;padding-bottom:14px;margin-bottom:14px;border-bottom:1px solid var(--border);}
+.campo-extra{flex:1;min-width:0;}
+.campo-extra label{
+  display:block;font-size:.68rem;text-transform:uppercase;letter-spacing:.04em;
+  color:var(--texto-claro);margin-bottom:4px;font-weight:600;
+}
+.campo-extra select,.campo-extra input{
+  width:100%;padding:9px 10px;border-radius:10px;border:1.5px solid var(--border);
+  font-size:.88rem;background:var(--surface);color:var(--texto);
+}
+
 .resumen-total{
   display:flex;justify-content:space-between;align-items:center;
   margin-top:14px;padding-top:14px;border-top:2px solid var(--capa-negro);
@@ -853,6 +873,21 @@ function renderRegistrar(){
         <button class="btn-cambiar" id="btn-cambiar-articulo">Cambiar</button>
       </div>
 
+      <div class="fila-extra">
+        <div class="campo-extra">
+          <label for="sel-ubicacion">Ubicación</label>
+          <select id="sel-ubicacion">
+            <option value="00">00</option>
+            <option value="10">10</option>
+            <option value="20">20</option>
+          </select>
+        </div>
+        <div class="campo-extra">
+          <label for="input-caducidad">Fecha de caducidad (opcional)</label>
+          <input type="date" id="input-caducidad">
+        </div>
+      </div>
+
       <div id="filas-unidades">
         ${art.unidades.map((u,i)=>`
           <div class="fila-unidad">
@@ -860,7 +895,11 @@ function renderRegistrar(){
               <div class="nombre-unidad">${u.nombre}</div>
               <div class="factor-unidad">= ${u.factor.toLocaleString("es-ES",{maximumFractionDigits:4})} Ton/unidad</div>
             </div>
-            <input type="text" inputmode="decimal" placeholder="0" data-factor="${u.factor}" data-nombre="${u.nombre}" id="cantidad-${i}">
+            <div class="stepper-cantidad">
+              <button type="button" class="btn-stepper" data-accion="menos" data-idx="${i}" aria-label="Restar">−</button>
+              <input type="text" inputmode="decimal" placeholder="0" data-factor="${u.factor}" data-nombre="${u.nombre}" id="cantidad-${i}">
+              <button type="button" class="btn-stepper" data-accion="mas" data-idx="${i}" aria-label="Sumar">+</button>
+            </div>
           </div>`).join("")}
       </div>
 
@@ -893,6 +932,16 @@ function renderRegistrar(){
   };
   inputs.forEach(inp => inp.addEventListener("input", actualizarTotal));
 
+  document.querySelectorAll(".btn-stepper").forEach(btn=>{
+    btn.addEventListener("click", ()=>{
+      const inp = inputs[Number(btn.dataset.idx)];
+      const actual = parseNum(inp.value);
+      const nuevo = btn.dataset.accion === "mas" ? actual + 1 : Math.max(0, actual - 1);
+      inp.value = nuevo === 0 ? "" : String(nuevo).replace(".", ",");
+      actualizarTotal();
+    });
+  });
+
   $("#btn-guardar-registro").addEventListener("click", async () => {
     const detalle = [];
     let total = 0;
@@ -908,6 +957,8 @@ function renderRegistrar(){
     if (!detalle.length) return;
 
     const { cantidad: totalUnidadBase, nombre: unidadBase } = aUnidadBase(total, art);
+    const ubicacion = $("#sel-ubicacion").value;
+    const fechaCaducidad = $("#input-caducidad").value || null;
 
     const btn = $("#btn-guardar-registro");
     btn.disabled = true; btn.textContent = "Guardando…";
@@ -920,12 +971,16 @@ function renderRegistrar(){
         inventario: state.inventarioActual,
         codigo: art.codigo,
         descripcion: art.descripcion,
+        ubicacion,
+        fechaCaducidad,
         detalle,
         totalToneladas: total,
         unidadBase,
         totalUnidadBase,
       });
       inputs.forEach(inp => inp.value = "");
+      $("#input-caducidad").value = "";
+      $("#sel-ubicacion").value = "00";
       actualizarTotal();
       await renderRecientes(art.codigo);
       btn.textContent = "✓ Guardado";
@@ -952,8 +1007,8 @@ async function renderRecientes(codigo){
     cont.innerHTML = registros.map(r=>`
       <div class="fila-detalle-registro">
         <div>
-          <div>${r.totalUnidadBase!=null ? fmtCantidad(r.totalUnidadBase)+" "+r.unidadBase : fmtTon(r.totalToneladas)+" Ton"}</div>
-          <div class="meta">${fmtFecha(r.fecha)} · ${r.usuario||""}</div>
+          <div>${r.totalUnidadBase!=null ? fmtCantidad(r.totalUnidadBase)+" "+r.unidadBase : fmtTon(r.totalToneladas)+" Ton"}${r.ubicacion ? ` · Ubic. ${r.ubicacion}` : ""}</div>
+          <div class="meta">${fmtFecha(r.fecha)} · ${r.usuario||""}${r.fechaCaducidad ? " · Caduca " + r.fechaCaducidad : ""}</div>
         </div>
         <button class="btn-borrar" data-id="${r._fileId}">Anular</button>
       </div>`).join("");
@@ -1096,7 +1151,8 @@ async function renderInventario(){
 
     const detalle = registros.flatMap(r => r.detalle.map(d => ({
       Fecha: r.fecha, Usuario: r.usuario, Almacen: r.almacen, Inventario: r.inventario,
-      Codigo: r.codigo, Descripcion: r.descripcion, Unidad: d.unidad, Cantidad: d.cantidad,
+      Codigo: r.codigo, Descripcion: r.descripcion, Ubicacion: r.ubicacion || "", "Fecha caducidad": r.fechaCaducidad || "",
+      Unidad: d.unidad, Cantidad: d.cantidad,
       "Factor Ton/ud": d.factor, "Subtotal Ton": Number(d.subtotal.toFixed(4)),
     })));
     const wsDetalle = XLSX.utils.json_to_sheet(detalle);
