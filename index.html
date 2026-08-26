@@ -249,6 +249,10 @@ main{flex:1;padding:16px;padding-bottom:32px;}
 .tabla-diferencias th,.tabla-diferencias td{white-space:nowrap;}
 .tabla-diferencias td.dif-sobra{color:#2f7a3d;font-weight:700;}
 .tabla-diferencias td.dif-falta{color:var(--capa-rojo);font-weight:700;}
+#tabla-diferencias{font-size:.76rem;}
+#tabla-diferencias .col-desc{
+  max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
+}
 .chip-metrica{
   flex:1;background:var(--surface);border:1px solid var(--border);border-radius:12px;
   padding:12px;text-align:center;
@@ -501,11 +505,21 @@ function parseNum(s){
   const n = parseFloat(String(s).replace(",", "."));
   return isNaN(n) ? 0 : n;
 }
+// Formatea en español "a mano" (punto de miles, coma decimal), sin depender de que el
+// navegador tenga soporte completo de Intl para es-ES (algunos no aplican el separador de miles).
+function formatearNumeroEs(n, decimales){
+  if (!isFinite(n)) n = 0;
+  const negativo = n < 0;
+  const fijo = Math.abs(n).toFixed(decimales);
+  const [entero, decimal] = fijo.split(".");
+  const enteroConPuntos = entero.replace(/\B(?=(\d{3})+(?!\d))/g, ".");
+  return (negativo ? "-" : "") + enteroConPuntos + (decimal !== undefined ? "," + decimal : "");
+}
 function fmtTon(n){
-  return n.toLocaleString("es-ES", {minimumFractionDigits:3, maximumFractionDigits:3});
+  return formatearNumeroEs(n, 3);
 }
 function fmtCantidad(n){
-  return n.toLocaleString("es-ES", {minimumFractionDigits:3, maximumFractionDigits:3});
+  return formatearNumeroEs(n, 3);
 }
 // Convierte un total en toneladas a la unidad base propia del artículo (Sacos, Unidades, Toneladas…)
 function aUnidadBase(totalToneladas, articulo){
@@ -1521,7 +1535,7 @@ async function renderDiferencias(registros){
       <table class="tabla-inventario tabla-diferencias" id="tabla-diferencias">
         <thead>
           <tr>
-            <th rowspan="2">Código</th><th rowspan="2">Descripción</th>
+            <th rowspan="2">Código</th><th rowspan="2" class="col-desc">Descripción</th>
             <th colspan="4" class="grupo">Inventario recuento</th>
             <th colspan="4" class="grupo">Inventario sistema</th>
             <th colspan="4" class="grupo">Diferencias</th>
@@ -1550,7 +1564,7 @@ async function renderDiferencias(registros){
     if (soloDif) f = f.filter(x => Math.abs(x.difTotal) > 0.0005 || Math.abs(x.dif00)>0.0005 || Math.abs(x.dif10)>0.0005 || Math.abs(x.dif20)>0.0005);
     tbody.innerHTML = f.map(x=>`
       <tr>
-        <td>${x.codigo}</td><td>${x.descripcion}</td>
+        <td>${x.codigo}</td><td class="col-desc" title="${x.descripcion}">${x.descripcion}</td>
         <td class="num">${fmtCantidad(x.rec00)}</td><td class="num">${fmtCantidad(x.rec10)}</td><td class="num">${fmtCantidad(x.rec20)}</td><td class="num">${fmtCantidad(x.recTotal)}</td>
         <td class="num">${fmtCantidad(x.sis00)}</td><td class="num">${fmtCantidad(x.sis10)}</td><td class="num">${fmtCantidad(x.sis20)}</td><td class="num">${fmtCantidad(x.sisTotal)}</td>
         ${celdaDif(x.dif00)}${celdaDif(x.dif10)}${celdaDif(x.dif20)}${celdaDif(x.difTotal)}
