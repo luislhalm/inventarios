@@ -231,6 +231,15 @@ main{flex:1;padding:16px;padding-bottom:32px;}
 
 /* ---------- vista inventario ---------- */
 .resumen-cabecera{display:flex;gap:10px;margin-bottom:14px;}
+
+.tabs-subvista{display:flex;gap:6px;margin-bottom:14px;background:var(--bg);border-radius:12px;padding:4px;}
+.tab-sub{flex:1;padding:9px 6px;border:none;border-radius:9px;background:none;font-size:.82rem;font-weight:700;color:var(--texto-claro);}
+.tab-sub.activa{background:var(--surface);color:var(--capa-purpura);box-shadow:var(--sombra);}
+
+.tabla-diferencias th.grupo{text-align:center;border-bottom:1px solid var(--border);}
+.tabla-diferencias th,.tabla-diferencias td{white-space:nowrap;}
+.tabla-diferencias td.dif-sobra{color:#2f7a3d;font-weight:700;}
+.tabla-diferencias td.dif-falta{color:var(--capa-rojo);font-weight:700;}
 .chip-metrica{
   flex:1;background:var(--surface);border:1px solid var(--border);border-radius:12px;
   padding:12px;text-align:center;
@@ -338,7 +347,7 @@ nav.tabs svg{width:22px;height:22px;}
     <div id="panel-nuevo-inventario" style="display:none" class="crear-inline crear-inline-col">
       <div class="crear-inline-fila">
         <label class="etiqueta-mini" for="input-nuevo-inventario">Nombre / mes</label>
-        <input id="input-nuevo-inventario" placeholder="Ej. 2026-08">
+        <select id="input-nuevo-inventario"></select>
       </div>
       <div class="crear-inline-fila">
         <label class="etiqueta-mini" for="input-fecha-inventario">Fecha y hora del recuento</label>
@@ -424,6 +433,9 @@ const state = {
   almacenes: [],
   inventarios: [],
   inventariosInfo: {},
+  stockSistema: null,
+  stockSistemaCacheKey: "",
+  vistaInventarioSub: "resumen",
   almacenActual: "",
   inventarioActual: "",
   vista: "registrar",
@@ -479,6 +491,33 @@ function aUnidadBase(totalToneladas, articulo){
   }
   return { cantidad: totalToneladas / base.factor, nombre: objetivo || base.nombre };
 }
+
+// Agrupa los registros de un inventario por artículo Y por ubicación (00/10/20),
+// convirtiendo cada ubicación a la unidad propia del artículo. Necesario para
+// comparar contra el Excel de stock de sistema, que viene con esas 3 columnas.
+function agregarPorArticuloYUbicacion(registros){
+  const mapaTon = new Map();
+  for (const r of registros){
+    const cur = mapaTon.get(r.codigo) || { codigo:r.codigo, descripcion:r.descripcion, ton:{"00":0,"10":0,"20":0} };
+    const ubic = ["00","10","20"].includes(r.ubicacion) ? r.ubicacion : "00";
+    cur.ton[ubic] += r.totalToneladas || 0;
+    mapaTon.set(r.codigo, cur);
+  }
+  const resultado = new Map();
+  for (const [codigo, cur] of mapaTon){
+    const articulo = state.articulosPorCodigo?.get(codigo);
+    const c00 = aUnidadBase(cur.ton["00"], articulo);
+    const c10 = aUnidadBase(cur.ton["10"], articulo);
+    const c20 = aUnidadBase(cur.ton["20"], articulo);
+    resultado.set(codigo, {
+      codigo, descripcion: cur.descripcion, unidad: c00.nombre,
+      c00: c00.cantidad, c10: c10.cantidad, c20: c20.cantidad,
+      total: c00.cantidad + c10.cantidad + c20.cantidad,
+    });
+  }
+  return resultado;
+}
+
 function fmtFecha(iso){
   const d = new Date(iso);
   return d.toLocaleString("es-ES", {day:"2-digit",month:"2-digit",year:"2-digit",hour:"2-digit",minute:"2-digit"});
@@ -486,6 +525,20 @@ function fmtFecha(iso){
 function mesActual(){
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+}
+const NOMBRES_MES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
+function poblarSelectMes(){
+  const sel = $("#input-nuevo-inventario");
+  if (!sel) return;
+  const base = new Date();
+  const opciones = [];
+  for (let i=-12; i<=2; i++){
+    const d = new Date(base.getFullYear(), base.getMonth()+i, 1);
+    const valor = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
+    opciones.push(`<option value="${valor}">${NOMBRES_MES[d.getMonth()]} ${d.getFullYear()}</option>`);
+  }
+  sel.innerHTML = opciones.join("");
+  sel.value = mesActual();
 }
 function setEstado(texto, tipo){
   const el = $("#estado-conexion");
@@ -722,6 +775,81 @@ async function leerInfoInventario(carpeta){
     return await res.json();
   }catch(e){
     return null;
+  }
+}
+
+/* ---------- stock de sistema (comparación de diferencias) ---------- */
+function normalizarTexto(s){
+  return String(s).toLowerCase().normalize("NFD").replace(/[\u0300-\u036f]/g,"").replace(/[^a-z0-9]/g,"");
+}
+function buscarColumnaLibre(fila, ...posibles){
+  const claves = Object.keys(fila);
+  for (const nombre of posibles){
+    const norm = normalizarTexto(nombre);
+    const k = claves.find(k => normalizarTexto(k) === norm);
+    if (k) return k;
+  }
+  for (const nombre of posibles){
+    const norm = normalizarTexto(nombre);
+    const k = claves.find(k => normalizarTexto(k).includes(norm) || norm.includes(normalizarTexto(k)));
+    if (k) return k;
+  }
+  return null;
+}
+
+const NOMBRE_ARCHIVO_STOCK_SISTEMA = "_stock_sistema.xlsx";
+
+async function subirStockSistema(file){
+  const buf = await file.arrayBuffer();
+  const carpeta = carpetaInventario();
+  await ensureFolder(carpeta);
+  await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/${NOMBRE_ARCHIVO_STOCK_SISTEMA}:/content`, {
+    method:"PUT",
+    headers:{"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
+    body: buf,
+  });
+  state.stockSistemaCacheKey = ""; // invalida caché
+}
+
+async function cargarStockSistema(){
+  const clave = carpetaInventario();
+  if (state.stockSistemaCacheKey === clave) return state.stockSistema;
+
+  try{
+    const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(clave)}/${NOMBRE_ARCHIVO_STOCK_SISTEMA}:/content`);
+    const buf = await res.arrayBuffer();
+    const wb = XLSX.read(buf, { type:"array" });
+    const ws = wb.Sheets[wb.SheetNames[0]];
+    const filas = XLSX.utils.sheet_to_json(ws, { defval:"" });
+
+    const mapa = new Map();
+    for (const fila of filas){
+      const kCodigo = buscarColumnaLibre(fila, "codigo articulo", "codigo");
+      const kDesc = buscarColumnaLibre(fila, "descripcion");
+      const k00 = buscarColumnaLibre(fila, "cantidad 00");
+      const k10 = buscarColumnaLibre(fila, "cantidad 10");
+      const k20 = buscarColumnaLibre(fila, "cantidad 20");
+      const codigo = String(kCodigo ? fila[kCodigo] : "").trim();
+      if (!codigo) continue;
+      const c00 = parseNum(k00 ? fila[k00] : 0);
+      const c10 = parseNum(k10 ? fila[k10] : 0);
+      const c20 = parseNum(k20 ? fila[k20] : 0);
+      mapa.set(codigo, {
+        codigo,
+        descripcion: String(kDesc ? fila[kDesc] : "").trim(),
+        c00, c10, c20, total: c00+c10+c20,
+      });
+    }
+    state.stockSistema = mapa;
+    state.stockSistemaCacheKey = clave;
+    return mapa;
+  }catch(e){
+    if (e.status === 404){
+      state.stockSistema = null;
+      state.stockSistemaCacheKey = clave;
+      return null;
+    }
+    throw e;
   }
 }
 
@@ -1179,6 +1307,22 @@ async function renderInventario(){
   }).sort((a,b)=> a.codigo.localeCompare(b.codigo, "es", {numeric:true}));
 
   cont.innerHTML = `
+    <div class="tabs-subvista">
+      <button class="tab-sub ${state.vistaInventarioSub==="resumen"?"activa":""}" id="btn-sub-resumen">Resumen</button>
+      <button class="tab-sub ${state.vistaInventarioSub==="diferencias"?"activa":""}" id="btn-sub-diferencias">Ver diferencias</button>
+    </div>
+    <div id="contenido-subvista"></div>
+  `;
+  $("#btn-sub-resumen").addEventListener("click", ()=>{ state.vistaInventarioSub = "resumen"; renderVista(); });
+  $("#btn-sub-diferencias").addEventListener("click", ()=>{ state.vistaInventarioSub = "diferencias"; renderVista(); });
+
+  if (state.vistaInventarioSub === "diferencias"){
+    await renderDiferencias(registros);
+    return;
+  }
+
+  const sub = $("#contenido-subvista");
+  sub.innerHTML = `
     <div class="resumen-cabecera">
       <div class="chip-metrica"><div class="num">${filas.length}</div><div class="lbl">Artículos</div></div>
       <div class="chip-metrica"><div class="num">${registros.length}</div><div class="lbl">Registros</div></div>
@@ -1252,6 +1396,139 @@ async function renderInventario(){
   });
 }
 
+async function renderDiferencias(registros){
+  const sub = $("#contenido-subvista");
+  sub.innerHTML = `<div class="spinner"></div>`;
+
+  let stock;
+  try{
+    stock = await cargarStockSistema();
+  }catch(e){
+    console.error(e);
+    sub.innerHTML = `<div class="aviso error">No se pudo comprobar el stock de sistema: ${e.message}</div>`;
+    return;
+  }
+
+  const recuentoMap = agregarPorArticuloYUbicacion(registros);
+
+  const cabeceraCarga = `
+    <div class="tarjeta">
+      <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
+        <div>
+          <div style="font-weight:700;font-size:.9rem;">Stock de sistema</div>
+          <div style="font-size:.78rem;color:var(--texto-claro);">${stock ? `Cargado · ${stock.size} artículos` : "Todavía no se ha cargado ningún Excel para este inventario"}</div>
+        </div>
+        <div style="display:flex;gap:8px;">
+          <input type="file" id="input-stock-sistema" accept=".xlsx,.xls" style="display:none;">
+          <button class="btn-secundario" id="btn-cargar-stock" style="width:auto;padding:9px 14px;">${stock ? "Reemplazar Excel" : "Cargar stock del sistema (Excel)"}</button>
+        </div>
+      </div>
+      <div style="font-size:.72rem;color:var(--texto-claro);margin-top:8px;">Formato esperado: código artículo, descripción, cantidad 00, cantidad 10, cantidad 20 (con encabezado).</div>
+    </div>`;
+
+  $("#contenido-subvista").innerHTML = cabeceraCarga + (stock ? `<div id="tabla-diferencias-cont"></div>` : "");
+
+  $("#btn-cargar-stock").addEventListener("click", ()=> $("#input-stock-sistema").click());
+  $("#input-stock-sistema").addEventListener("change", async (e)=>{
+    const file = e.target.files[0];
+    if (!file) return;
+    const btn = $("#btn-cargar-stock");
+    btn.disabled = true; btn.textContent = "Cargando…";
+    try{
+      await subirStockSistema(file);
+      await renderDiferencias(registros);
+    }catch(err){
+      console.error(err);
+      alert("No se pudo cargar el Excel: " + err.message);
+      btn.disabled = false;
+    }
+  });
+
+  if (!stock) return;
+
+  // Unión de artículos: los contados + los que trae el sistema aunque no se hayan contado
+  const codigos = new Set([...recuentoMap.keys(), ...stock.keys()]);
+  const filas = Array.from(codigos).map(codigo=>{
+    const articulo = state.articulosPorCodigo?.get(codigo);
+    const rec = recuentoMap.get(codigo) || { c00:0, c10:0, c20:0, total:0 };
+    const sis = stock.get(codigo) || { c00:0, c10:0, c20:0, total:0 };
+    const unidad = rec.unidad || articulo?.unidadSistema || articulo?.unidades?.[0]?.nombre || "";
+    return {
+      codigo,
+      descripcion: articulo?.descripcion || rec.descripcion || sis.descripcion || "",
+      unidad,
+      rec00: rec.c00||0, rec10: rec.c10||0, rec20: rec.c20||0, recTotal: rec.total||0,
+      sis00: sis.c00||0, sis10: sis.c10||0, sis20: sis.c20||0, sisTotal: sis.total||0,
+      dif00: (rec.c00||0)-(sis.c00||0), dif10: (rec.c10||0)-(sis.c10||0), dif20: (rec.c20||0)-(sis.c20||0),
+      difTotal: (rec.total||0)-(sis.total||0),
+    };
+  }).sort((a,b)=> a.codigo.localeCompare(b.codigo, "es", {numeric:true}));
+
+  const contTabla = $("#tabla-diferencias-cont");
+  contTabla.innerHTML = `
+    <div class="campo-busqueda">
+      <input id="filtro-diferencias" placeholder="Filtrar por código o descripción…">
+    </div>
+    <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:var(--texto-claro);margin:-4px 0 12px;">
+      <input type="checkbox" id="chk-solo-diferencias"> Mostrar solo artículos con diferencia
+    </label>
+    <div class="tarjeta" style="overflow-x:auto;">
+      <table class="tabla-inventario tabla-diferencias" id="tabla-diferencias">
+        <thead>
+          <tr>
+            <th rowspan="2">Código</th><th rowspan="2">Descripción</th>
+            <th colspan="4" class="grupo">Inventario recuento</th>
+            <th colspan="4" class="grupo">Inventario sistema</th>
+            <th colspan="4" class="grupo">Diferencias</th>
+          </tr>
+          <tr>
+            <th class="num">00</th><th class="num">10</th><th class="num">20</th><th class="num">Total</th>
+            <th class="num">00</th><th class="num">10</th><th class="num">20</th><th class="num">Total</th>
+            <th class="num">00</th><th class="num">10</th><th class="num">20</th><th class="num">Total</th>
+          </tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+    </div>
+    <button class="btn-secundario" id="btn-exportar-diferencias">Exportar diferencias a Excel</button>
+  `;
+
+  function celdaDif(v){
+    const cls = v > 0.0005 ? "dif-sobra" : (v < -0.0005 ? "dif-falta" : "");
+    return `<td class="num ${cls}">${fmtCantidad(v)}</td>`;
+  }
+
+  function pintar(filtro, soloDif){
+    const tbody = $("#tabla-diferencias tbody");
+    let f = filas;
+    if (filtro) f = f.filter(x => x.codigo.toLowerCase().includes(filtro) || x.descripcion.toLowerCase().includes(filtro));
+    if (soloDif) f = f.filter(x => Math.abs(x.difTotal) > 0.0005 || Math.abs(x.dif00)>0.0005 || Math.abs(x.dif10)>0.0005 || Math.abs(x.dif20)>0.0005);
+    tbody.innerHTML = f.map(x=>`
+      <tr>
+        <td>${x.codigo}</td><td>${x.descripcion}</td>
+        <td class="num">${fmtCantidad(x.rec00)}</td><td class="num">${fmtCantidad(x.rec10)}</td><td class="num">${fmtCantidad(x.rec20)}</td><td class="num">${fmtCantidad(x.recTotal)}</td>
+        <td class="num">${fmtCantidad(x.sis00)}</td><td class="num">${fmtCantidad(x.sis10)}</td><td class="num">${fmtCantidad(x.sis20)}</td><td class="num">${fmtCantidad(x.sisTotal)}</td>
+        ${celdaDif(x.dif00)}${celdaDif(x.dif10)}${celdaDif(x.dif20)}${celdaDif(x.difTotal)}
+      </tr>`).join("");
+  }
+  pintar("", false);
+  $("#filtro-diferencias").addEventListener("input", e => pintar(e.target.value.trim().toLowerCase(), $("#chk-solo-diferencias").checked));
+  $("#chk-solo-diferencias").addEventListener("change", e => pintar($("#filtro-diferencias").value.trim().toLowerCase(), e.target.checked));
+
+  $("#btn-exportar-diferencias").addEventListener("click", ()=>{
+    const wb = XLSX.utils.book_new();
+    const unidadCol = filas[0]?.unidad ? ` (${filas.map(f=>f.unidad).filter((v,i,a)=>a.indexOf(v)===i).join("/")})` : "";
+    const ws = XLSX.utils.json_to_sheet(filas.map(x=>({
+      "Código": x.codigo, "Descripción": x.descripcion, "Unidad": x.unidad,
+      "Recuento 00": Number(x.rec00.toFixed(3)), "Recuento 10": Number(x.rec10.toFixed(3)), "Recuento 20": Number(x.rec20.toFixed(3)), "Recuento Total": Number(x.recTotal.toFixed(3)),
+      "Sistema 00": Number(x.sis00.toFixed(3)), "Sistema 10": Number(x.sis10.toFixed(3)), "Sistema 20": Number(x.sis20.toFixed(3)), "Sistema Total": Number(x.sisTotal.toFixed(3)),
+      "Diferencia 00": Number(x.dif00.toFixed(3)), "Diferencia 10": Number(x.dif10.toFixed(3)), "Diferencia 20": Number(x.dif20.toFixed(3)), "Diferencia Total": Number(x.difTotal.toFixed(3)),
+    })));
+    XLSX.utils.book_append_sheet(wb, ws, "Diferencias");
+    XLSX.writeFile(wb, `Diferencias_${sanitizeNombre(state.almacenActual)}_${sanitizeNombre(state.inventarioActual)}.xlsx`);
+  });
+}
+
 /* ============================================================
    NAVEGACIÓN / EVENTOS GENERALES
    ============================================================ */
@@ -1279,6 +1556,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   // para que el botón de login nunca se quede "muerto" en silencio.
   $("#btn-login").addEventListener("click", login);
   $("#btn-logout").addEventListener("click", logout);
+  poblarSelectMes();
 
   await window.__cargaLibs; // espera a que terminen los intentos de carga de librerías
 
@@ -1318,6 +1596,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.almacenActual = e.target.value;
     state.articuloSeleccionado = null;
     state.editandoId = null;
+    state.vistaInventarioSub = "resumen";
     await cargarInventarios();
   });
 
@@ -1330,6 +1609,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.inventarioActual = e.target.value;
     state.articuloSeleccionado = null;
     state.editandoId = null;
+    state.vistaInventarioSub = "resumen";
     renderVista();
   });
 
@@ -1369,7 +1649,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         creadoEn: new Date().toISOString(),
       });
       $("#panel-nuevo-inventario").style.display = "none";
-      $("#input-nuevo-inventario").value = "";
+      $("#input-nuevo-inventario").value = mesActual();
       $("#input-fecha-inventario").value = "";
       await cargarInventarios();
       $("#sel-inventario").value = nombre;
