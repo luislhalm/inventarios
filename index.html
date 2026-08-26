@@ -820,23 +820,21 @@ async function cargarStockSistema(){
     const buf = await res.arrayBuffer();
     const wb = XLSX.read(buf, { type:"array" });
     const ws = wb.Sheets[wb.SheetNames[0]];
-    const filas = XLSX.utils.sheet_to_json(ws, { defval:"" });
+    // Leemos por posición de columna, no por nombre de encabezado (el encabezado
+    // solo se usa para saltar la primera fila): 1ª código, 2ª descripción,
+    // 3ª/4ª/5ª cantidad en ubicación 00/10/20.
+    const filas = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", range:1 });
 
     const mapa = new Map();
     for (const fila of filas){
-      const kCodigo = buscarColumnaLibre(fila, "codigo articulo", "codigo");
-      const kDesc = buscarColumnaLibre(fila, "descripcion");
-      const k00 = buscarColumnaLibre(fila, "cantidad 00");
-      const k10 = buscarColumnaLibre(fila, "cantidad 10");
-      const k20 = buscarColumnaLibre(fila, "cantidad 20");
-      const codigo = String(kCodigo ? fila[kCodigo] : "").trim();
+      const codigo = String(fila[0] ?? "").trim();
       if (!codigo) continue;
-      const c00 = parseNum(k00 ? fila[k00] : 0);
-      const c10 = parseNum(k10 ? fila[k10] : 0);
-      const c20 = parseNum(k20 ? fila[k20] : 0);
+      const c00 = parseNum(fila[2]);
+      const c10 = parseNum(fila[3]);
+      const c20 = parseNum(fila[4]);
       mapa.set(codigo, {
         codigo,
-        descripcion: String(kDesc ? fila[kDesc] : "").trim(),
+        descripcion: String(fila[1] ?? "").trim(),
         c00, c10, c20, total: c00+c10+c20,
       });
     }
