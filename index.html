@@ -805,7 +805,8 @@ async function loadAlmacenesMaestro(){
   const filas = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", range:1 });
   state.almacenesMaestro = filas
     .map(fila => ({ codigo: String(fila[0] ?? "").trim(), nombre: String(fila[1] ?? "").trim() }))
-    .filter(a => a.nombre);
+    .filter(a => a.nombre)
+    .sort((a,b) => a.codigo.localeCompare(b.codigo, "es", {numeric:true}));
   state.almacenesPorNombre = new Map(state.almacenesMaestro.map(a => [a.nombre, a]));
 }
 
