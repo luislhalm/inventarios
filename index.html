@@ -359,10 +359,7 @@ nav.tabs svg{width:22px;height:22px;}
       </div>
     </div>
 
-    <div id="panel-nuevo-almacen" style="display:none" class="crear-inline">
-      <input id="input-nuevo-almacen" placeholder="Nombre del nuevo almacén">
-      <button id="btn-crear-almacen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:13px;height:13px;"><path d="M12 5v14M5 12h14"/></svg>Crear</button>
-    </div>
+
     <div id="panel-nuevo-inventario" style="display:none" class="crear-inline crear-inline-col">
       <div class="fila-anio-mes">
         <div class="crear-inline-fila">
@@ -442,6 +439,9 @@ const CONFIG = {
   // Ruta del Excel maestro de artículos dentro de esa misma biblioteca
   MASTER_FILE_PATH: "_Productos.xlsx",
 
+  // Maestro de almacenes: 1ª columna código, 2ª columna nombre del almacén (con encabezado).
+  ALMACENES_FILE_PATH: "Almacenes.xlsx",
+
   // Déjalo vacío para usar la primera hoja del Excel maestro
   MASTER_SHEET_NAME: "",
 };
@@ -471,6 +471,8 @@ const state = {
   driveId: null,
   articulos: [],
   articulosPorCodigo: new Map(),
+  almacenesMaestro: [],
+  almacenesPorNombre: new Map(),
   almacenes: [],
   inventarios: [],
   inventariosInfo: {},
@@ -591,11 +593,6 @@ function setEstado(texto, tipo){
 function avisoLogin(texto, tipo){
   $("#login-aviso").innerHTML = texto ? `<div class="aviso ${tipo||'error'}" style="margin-top:10px;max-width:320px;">${texto}</div>` : "";
 }
-function abrirCreadorAlmacen(){
-  $("#panel-nuevo-almacen").style.display = "flex";
-  $("#panel-nuevo-almacen").scrollIntoView({behavior:"smooth", block:"center"});
-  $("#input-nuevo-almacen").focus();
-}
 function abrirSelectorAlmacen(){
   $("#sel-almacen").scrollIntoView({behavior:"smooth", block:"center"});
   $("#sel-almacen").focus();
@@ -606,7 +603,7 @@ function fechaHoraLocalInput(){
   return d.toISOString().slice(0,16);
 }
 function abrirCreadorInventario(){
-  if (!state.almacenActual) return abrirCreadorAlmacen();
+  if (!state.almacenActual) return abrirSelectorAlmacen();
   $("#panel-nuevo-inventario").style.display = "flex";
   if (!$("#input-fecha-inventario").value) $("#input-fecha-inventario").value = fechaHoraLocalInput();
   $("#panel-nuevo-inventario").scrollIntoView({behavior:"smooth", block:"center"});
@@ -798,6 +795,20 @@ async function loadMaster(){
   state.articulosPorCodigo = new Map(state.articulos.map(a => [a.codigo, a]));
 }
 
+async function loadAlmacenesMaestro(){
+  const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(CONFIG.ALMACENES_FILE_PATH)}:/content`);
+  const buf = await res.arrayBuffer();
+  const wb = XLSX.read(buf, { type:"array" });
+  const ws = wb.Sheets[wb.SheetNames[0]];
+  // Igual que el stock de sistema: leemos por posición de columna (1ª código, 2ª nombre),
+  // sin depender del texto exacto del encabezado. Se salta la primera fila (encabezado).
+  const filas = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", range:1 });
+  state.almacenesMaestro = filas
+    .map(fila => ({ codigo: String(fila[0] ?? "").trim(), nombre: String(fila[1] ?? "").trim() }))
+    .filter(a => a.nombre);
+  state.almacenesPorNombre = new Map(state.almacenesMaestro.map(a => [a.nombre, a]));
+}
+
 /* ---------- registros ---------- */
 function carpetaInventario(){
   return `${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${state.inventarioActual}`;
@@ -962,31 +973,31 @@ async function arrancarApp(account){
     await resolveSiteAndDrive();
     setEstado("Cargando maestro de artículos…");
     await loadMaster();
-    setEstado(`Conectado · ${state.articulos.length} artículos cargados`, "ok");
+    setEstado("Cargando maestro de almacenes…");
+    await loadAlmacenesMaestro();
+    setEstado(`Conectado · ${state.articulos.length} artículos · ${state.almacenesMaestro.length} almacenes`, "ok");
     await cargarAlmacenes();
   }catch(e){
     console.error(e);
     setEstado("Error de conexión — revisa la CONFIG (ver detalle abajo)", "error");
-    $("#contenido").innerHTML = `<div class="aviso error">No se ha podido conectar con SharePoint.<br><br><b>Detalle:</b> ${e.message}<br><br>Revisa en la CONFIG del archivo: SITE_URL, LIBRARY_NAME, ROOT_FOLDER y MASTER_FILE_PATH, y que la cuenta tenga acceso a ese sitio.</div>`;
+    $("#contenido").innerHTML = `<div class="aviso error">No se ha podido conectar con SharePoint.<br><br><b>Detalle:</b> ${e.message}<br><br>Revisa en la CONFIG del archivo: SITE_URL, LIBRARY_NAME, ROOT_FOLDER, MASTER_FILE_PATH y ALMACENES_FILE_PATH, y que la cuenta tenga acceso a ese sitio.</div>`;
   }
 }
 
 async function cargarAlmacenes(){
-  state.almacenes = await listChildFolders(CONFIG.ROOT_FOLDER);
+  // El almacén ya no se crea a mano: la lista sale siempre del maestro "Almacenes.xlsx".
+  state.almacenes = state.almacenesMaestro.map(a => a.nombre);
   const sel = $("#sel-almacen");
-  sel.innerHTML = state.almacenes.map(a=>`<option value="${a}">${a}</option>`).join("")
-    + `<option value="__nuevo__">+ Nuevo almacén…</option>`;
+  sel.innerHTML = state.almacenes.map(a=>`<option value="${a}">${a}</option>`).join("");
   if (state.almacenes.length){
     state.almacenActual = state.almacenes[0];
     sel.value = state.almacenActual;
-    $("#panel-nuevo-almacen").style.display = "none";
+    // Nos aseguramos de que la carpeta de ese almacén existe en SharePoint
+    // (antes se creaba con el botón "+ Nuevo almacén"; ahora se crea sola).
+    await ensureFolder(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`);
     await cargarInventarios();
   } else {
-    // No hay ningún almacén todavía: mostramos directamente el formulario de creación,
-    // porque el <select> no dispara "change" cuando solo tiene esta única opción.
     state.almacenActual = "";
-    sel.value = "__nuevo__";
-    $("#panel-nuevo-almacen").style.display = "flex";
     $("#sel-inventario").innerHTML = "";
     $("#panel-nuevo-inventario").style.display = "none";
     renderVista();
@@ -1028,10 +1039,7 @@ function renderRegistrar(){
   const cont = $("#contenido");
 
   if (!state.almacenActual){
-    cont.innerHTML = `
-      <div class="aviso info">Todavía no hay ningún almacén creado.</div>
-      <button class="btn-primario" id="btn-cta-crear-almacen">${ICONOS.mas}Crear almacén</button>`;
-    $("#btn-cta-crear-almacen").addEventListener("click", abrirCreadorAlmacen);
+    cont.innerHTML = `<div class="aviso error">No hay ningún almacén disponible. Revisa que el archivo "${CONFIG.ALMACENES_FILE_PATH}" tenga filas con código y nombre de almacén.</div>`;
     return;
   }
   if (!state.inventarioActual){
@@ -1303,10 +1311,7 @@ async function renderInventario(){
   const cont = $("#contenido");
 
   if (!state.almacenActual){
-    cont.innerHTML = `
-      <div class="aviso info">Todavía no hay ningún almacén creado.</div>
-      <button class="btn-primario" id="btn-cta-crear-almacen">${ICONOS.mas}Crear almacén</button>`;
-    $("#btn-cta-crear-almacen").addEventListener("click", abrirCreadorAlmacen);
+    cont.innerHTML = `<div class="aviso error">No hay ningún almacén disponible. Revisa que el archivo "${CONFIG.ALMACENES_FILE_PATH}" tenga filas con código y nombre de almacén.</div>`;
     return;
   }
   if (!state.inventarioActual){
@@ -1627,15 +1632,11 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   $("#sel-almacen").addEventListener("change", async (e)=>{
-    if (e.target.value === "__nuevo__"){
-      abrirCreadorAlmacen();
-      e.target.value = state.almacenActual || "";
-      return;
-    }
     state.almacenActual = e.target.value;
     state.articuloSeleccionado = null;
     state.editandoId = null;
     state.vistaInventarioSub = "resumen";
+    await ensureFolder(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`);
     await cargarInventarios();
   });
 
@@ -1650,27 +1651,6 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.editandoId = null;
     state.vistaInventarioSub = "resumen";
     renderVista();
-  });
-
-  $("#btn-crear-almacen").addEventListener("click", async ()=>{
-    const nombre = sanitizeNombre($("#input-nuevo-almacen").value);
-    if (!nombre) return;
-    const btn = $("#btn-crear-almacen");
-    btn.disabled = true; btn.textContent = "Creando…";
-    try{
-      await ensureFolder(`${CONFIG.ROOT_FOLDER}/${nombre}`);
-      $("#panel-nuevo-almacen").style.display = "none";
-      $("#input-nuevo-almacen").value = "";
-      await cargarAlmacenes();
-      $("#sel-almacen").value = nombre;
-      state.almacenActual = nombre;
-      await cargarInventarios();
-    }catch(e){
-      console.error(e);
-      alert("No se pudo crear el almacén: " + e.message);
-    }finally{
-      btn.disabled = false; btn.textContent = "Crear";
-    }
   });
 
   $("#btn-crear-inventario").addEventListener("click", async ()=>{
