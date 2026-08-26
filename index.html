@@ -111,6 +111,7 @@ header.cabecera{
 .usuario-chip button{
   background:none;border:1px solid var(--border);border-radius:20px;
   padding:4px 10px;font-size:.72rem;color:var(--texto-claro);
+  display:inline-flex;align-items:center;gap:4px;
 }
 
 .selectores{display:flex;gap:8px;margin-top:12px;}
@@ -215,6 +216,12 @@ main{flex:1;padding:16px;padding-bottom:32px;}
 .resumen-total .etiqueta{font-size:.8rem;color:var(--texto-claro);font-weight:600;}
 .resumen-total .valor{font-size:1.4rem;font-weight:800;color:var(--capa-negro);}
 
+.btn-primario,.btn-secundario,.btn-texto,.btn-cambiar,.btn-borrar,.crear-inline button{
+  display:inline-flex;align-items:center;justify-content:center;gap:6px;
+}
+.btn-primario svg,.btn-secundario svg,.btn-texto svg,.btn-cambiar svg,.btn-borrar svg,.crear-inline button svg{
+  width:15px;height:15px;flex-shrink:0;
+}
 .btn-primario{
   width:100%;padding:15px;border:none;border-radius:12px;
   background:var(--capa-naranja);color:#fff;font-size:1rem;font-weight:700;
@@ -228,12 +235,14 @@ main{flex:1;padding:16px;padding-bottom:32px;}
   border:1.5px solid var(--capa-purpura);color:var(--capa-purpura);font-weight:700;font-size:.92rem;
 }
 .btn-texto{background:none;border:none;color:var(--capa-purpura);font-weight:600;font-size:.85rem;padding:8px;}
+.btn-texto svg{width:13px;height:13px;}
 
 /* ---------- vista inventario ---------- */
 .resumen-cabecera{display:flex;gap:10px;margin-bottom:14px;}
 
 .tabs-subvista{display:flex;gap:6px;margin-bottom:14px;background:var(--bg);border-radius:12px;padding:4px;}
-.tab-sub{flex:1;padding:9px 6px;border:none;border-radius:9px;background:none;font-size:.82rem;font-weight:700;color:var(--texto-claro);}
+.tab-sub{flex:1;padding:9px 6px;border:none;border-radius:9px;background:none;font-size:.82rem;font-weight:700;color:var(--texto-claro);display:inline-flex;align-items:center;justify-content:center;gap:6px;}
+.tab-sub svg{width:14px;height:14px;}
 .tab-sub.activa{background:var(--surface);color:var(--capa-purpura);box-shadow:var(--sombra);}
 
 .tabla-diferencias th.grupo{text-align:center;border-bottom:1px solid var(--border);}
@@ -263,6 +272,7 @@ table.tabla-inventario tbody tr{cursor:pointer;}
 }
 .fila-detalle-registro .meta{color:var(--texto-claro);font-size:.72rem;}
 .btn-borrar{background:none;border:none;color:var(--capa-rojo);font-size:.72rem;font-weight:700;padding:4px 6px;flex-shrink:0;}
+.btn-borrar svg{width:13px;height:13px;}
 
 /* ---------- navegación inferior ---------- */
 nav.tabs{
@@ -290,6 +300,15 @@ nav.tabs svg{width:22px;height:22px;}
 .crear-inline-col{flex-direction:column;align-items:stretch;}
 .crear-inline-fila{display:flex;flex-direction:column;gap:3px;}
 .etiqueta-mini{font-size:.68rem;color:var(--texto-claro);font-weight:600;text-transform:uppercase;letter-spacing:.03em;}
+.fila-anio-mes{display:flex;gap:8px;}
+.select-mes{
+  width:100%;padding:9px 10px;border-radius:9px;border:1.5px solid var(--border);
+  font-size:.9rem;font-weight:700;color:var(--capa-negro);background:var(--surface);
+  appearance:none;
+  background-image:url("data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 20 20' fill='%238A837C'><path d='M5.5 7.5l4.5 4.5 4.5-4.5z'/></svg>");
+  background-repeat:no-repeat;background-position:right 8px center;background-size:14px;
+}
+.select-mes:focus{outline:none;border-color:var(--capa-naranja);}
 .crear-inline input{
   flex:1;padding:9px 10px;border-radius:9px;border:1.5px solid var(--border);font-size:.85rem;
 }
@@ -325,7 +344,7 @@ nav.tabs svg{width:22px;height:22px;}
       <img class="logo-mini" src="data:image/png;base64,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" alt="CAPA">
       <div class="usuario-chip">
         <span id="nombre-usuario"></span>
-        <button id="btn-logout">Salir</button>
+        <button id="btn-logout"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="width:13px;height:13px;"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>Salir</button>
       </div>
     </div>
 
@@ -342,18 +361,24 @@ nav.tabs svg{width:22px;height:22px;}
 
     <div id="panel-nuevo-almacen" style="display:none" class="crear-inline">
       <input id="input-nuevo-almacen" placeholder="Nombre del nuevo almacén">
-      <button id="btn-crear-almacen">Crear</button>
+      <button id="btn-crear-almacen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:13px;height:13px;"><path d="M12 5v14M5 12h14"/></svg>Crear</button>
     </div>
     <div id="panel-nuevo-inventario" style="display:none" class="crear-inline crear-inline-col">
-      <div class="crear-inline-fila">
-        <label class="etiqueta-mini" for="input-nuevo-inventario">Nombre / mes</label>
-        <select id="input-nuevo-inventario"></select>
+      <div class="fila-anio-mes">
+        <div class="crear-inline-fila">
+          <label class="etiqueta-mini" for="sel-anio-inventario">Año</label>
+          <select id="sel-anio-inventario" class="select-mes"></select>
+        </div>
+        <div class="crear-inline-fila" style="flex:1.4;">
+          <label class="etiqueta-mini" for="sel-mes-inventario">Mes</label>
+          <select id="sel-mes-inventario" class="select-mes"></select>
+        </div>
       </div>
       <div class="crear-inline-fila">
         <label class="etiqueta-mini" for="input-fecha-inventario">Fecha y hora del recuento</label>
         <input id="input-fecha-inventario" type="datetime-local">
       </div>
-      <button id="btn-crear-inventario">Crear</button>
+      <button id="btn-crear-inventario"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" style="width:13px;height:13px;"><path d="M12 5v14M5 12h14"/></svg>Crear</button>
     </div>
 
     <div class="estado-conexion" id="info-inventario-actual" style="display:none;"></div>
@@ -381,6 +406,22 @@ nav.tabs svg{width:22px;height:22px;}
 /* ============================================================
    CONFIGURACIÓN — RELLENA ESTOS VALORES ANTES DE USAR LA APP
    ============================================================ */
+/* ============================================================
+   ICONOS (SVG pequeños, trazo simple, para acompañar los botones)
+   ============================================================ */
+const ICONOS = {
+  mas: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>`,
+  guardar: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M19 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h11l5 5v11a2 2 0 0 1-2 2Z"/><path d="M17 21v-8H7v8M7 3v5h8"/></svg>`,
+  papelera: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 6h18M8 6V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2m3 0-1 14a2 2 0 0 1-2 2H8a2 2 0 0 1-2-2L5 6"/></svg>`,
+  lapiz: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9"/><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4Z"/></svg>`,
+  cerrar: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M18 6 6 18M6 6l12 12"/></svg>`,
+  descargar: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M7 10l5 5 5-5"/><path d="M12 15V3"/></svg>`,
+  subir: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><path d="M17 8l-5-5-5 5"/><path d="M12 3v12"/></svg>`,
+  cambiar: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M7 3 3 7l4 4"/><path d="M3 7h13a4 4 0 0 1 4 4v1"/><path d="M17 21l4-4-4-4"/><path d="M21 17H8a4 4 0 0 1-4-4v-1"/></svg>`,
+  carpeta: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M4 20h16a2 2 0 0 0 2-2V8a2 2 0 0 0-2-2h-7.9a2 2 0 0 1-1.69-.9L9.6 3.9A2 2 0 0 0 7.9 3H4a2 2 0 0 0-2 2v13a2 2 0 0 0 2 2Z"/></svg>`,
+  salir: `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><path d="M16 17l5-5-5-5"/><path d="M21 12H9"/></svg>`,
+};
+
 const CONFIG = {
   // Client ID (Id. de aplicación) de tu App Registration en Entra ID
   CLIENT_ID: "4a931b7e-9fea-406a-95d8-7d5846d7563d",
@@ -528,17 +569,20 @@ function mesActual(){
 }
 const NOMBRES_MES = ["Enero","Febrero","Marzo","Abril","Mayo","Junio","Julio","Agosto","Septiembre","Octubre","Noviembre","Diciembre"];
 function poblarSelectMes(){
-  const sel = $("#input-nuevo-inventario");
-  if (!sel) return;
-  const base = new Date();
-  const opciones = [];
-  for (let i=-12; i<=2; i++){
-    const d = new Date(base.getFullYear(), base.getMonth()+i, 1);
-    const valor = `${d.getFullYear()}-${String(d.getMonth()+1).padStart(2,"0")}`;
-    opciones.push(`<option value="${valor}">${NOMBRES_MES[d.getMonth()]} ${d.getFullYear()}</option>`);
-  }
-  sel.innerHTML = opciones.join("");
-  sel.value = mesActual();
+  const selAnio = $("#sel-anio-inventario");
+  const selMes = $("#sel-mes-inventario");
+  if (!selAnio || !selMes) return;
+  const hoy = new Date();
+  const anioActual = hoy.getFullYear();
+  const anios = [];
+  for (let a = anioActual - 2; a <= anioActual + 1; a++) anios.push(a);
+  selAnio.innerHTML = anios.map(a => `<option value="${a}">${a}</option>`).join("");
+  selMes.innerHTML = NOMBRES_MES.map((nombre,i) => `<option value="${String(i+1).padStart(2,"0")}">${nombre}</option>`).join("");
+  selAnio.value = String(anioActual);
+  selMes.value = String(hoy.getMonth()+1).padStart(2,"0");
+}
+function mesInventarioSeleccionado(){
+  return `${$("#sel-anio-inventario").value}-${$("#sel-mes-inventario").value}`;
 }
 function setEstado(texto, tipo){
   const el = $("#estado-conexion");
@@ -564,10 +608,8 @@ function fechaHoraLocalInput(){
 function abrirCreadorInventario(){
   if (!state.almacenActual) return abrirCreadorAlmacen();
   $("#panel-nuevo-inventario").style.display = "flex";
-  if (!$("#input-nuevo-inventario").value) $("#input-nuevo-inventario").value = mesActual();
   if (!$("#input-fecha-inventario").value) $("#input-fecha-inventario").value = fechaHoraLocalInput();
   $("#panel-nuevo-inventario").scrollIntoView({behavior:"smooth", block:"center"});
-  $("#input-nuevo-inventario").focus();
 }
 function abrirSelectorInventario(){
   $("#sel-inventario").scrollIntoView({behavior:"smooth", block:"center"});
@@ -973,7 +1015,6 @@ async function cargarInventarios(){
     // Igual que con almacenes: sin inventarios previos, mostramos el formulario directamente.
     state.inventarioActual = "";
     sel.value = "__nuevo__";
-    $("#input-nuevo-inventario").value = mesActual();
     $("#input-fecha-inventario").value = fechaHoraLocalInput();
     $("#panel-nuevo-inventario").style.display = "flex";
   }
@@ -989,7 +1030,7 @@ function renderRegistrar(){
   if (!state.almacenActual){
     cont.innerHTML = `
       <div class="aviso info">Todavía no hay ningún almacén creado.</div>
-      <button class="btn-primario" id="btn-cta-crear-almacen">+ Crear almacén</button>`;
+      <button class="btn-primario" id="btn-cta-crear-almacen">${ICONOS.mas}Crear almacén</button>`;
     $("#btn-cta-crear-almacen").addEventListener("click", abrirCreadorAlmacen);
     return;
   }
@@ -997,8 +1038,8 @@ function renderRegistrar(){
     cont.innerHTML = `
       <div class="aviso info">Elige o crea un inventario (recuento) para "${state.almacenActual}".</div>
       <div style="display:flex;flex-direction:column;gap:10px;">
-        ${state.inventarios.length ? '<button class="btn-secundario" id="btn-cta-abrir-inventario">Abrir inventario existente</button>' : ''}
-        <button class="btn-primario" id="btn-cta-crear-inventario">+ Nuevo inventario</button>
+        ${state.inventarios.length ? `<button class="btn-secundario" id="btn-cta-abrir-inventario">${ICONOS.carpeta}Abrir inventario existente</button>` : ''}
+        <button class="btn-primario" id="btn-cta-crear-inventario">${ICONOS.mas}Nuevo inventario</button>
       </div>`;
     $("#btn-cta-abrir-inventario")?.addEventListener("click", abrirSelectorInventario);
     $("#btn-cta-crear-inventario").addEventListener("click", abrirCreadorInventario);
@@ -1029,12 +1070,12 @@ function renderRegistrar(){
           <div class="cod">${art.codigo}</div>
           <div class="desc">${art.descripcion}</div>
         </div>
-        <button class="btn-cambiar" id="btn-cambiar-articulo">Cambiar</button>
+        <button class="btn-cambiar" id="btn-cambiar-articulo">${ICONOS.cambiar}Cambiar</button>
       </div>
 
       <div class="aviso info" id="aviso-editando" style="display:none;align-items:center;justify-content:space-between;gap:10px;">
         <span>Editando un registro existente</span>
-        <button class="btn-texto" id="btn-cancelar-edicion" style="padding:2px;">Cancelar edición</button>
+        <button class="btn-texto" id="btn-cancelar-edicion" style="padding:2px;">${ICONOS.cerrar}Cancelar edición</button>
       </div>
 
       <div class="fila-extra">
@@ -1072,7 +1113,7 @@ function renderRegistrar(){
         <span class="valor" id="total-toneladas">0 ${art.unidadSistema || art.unidades[0]?.nombre || "Cantidad"}</span>
       </div>
 
-      <button class="btn-primario" id="btn-guardar-registro" disabled>Guardar registro</button>
+      <button class="btn-primario" id="btn-guardar-registro" disabled>${ICONOS.guardar}Guardar registro</button>
     </div>
 
     <div class="tarjeta" id="tarjeta-recientes">
@@ -1116,7 +1157,7 @@ function renderRegistrar(){
     $("#input-caducidad").value = "";
     $("#sel-ubicacion").value = "00";
     actualizarTotal();
-    $("#btn-guardar-registro").textContent = "Guardar registro";
+    $("#btn-guardar-registro").innerHTML = ICONOS.guardar + "Guardar registro";
   }
   $("#btn-cancelar-edicion").addEventListener("click", salirModoEdicion);
 
@@ -1130,7 +1171,7 @@ function renderRegistrar(){
     $("#input-caducidad").value = r.fechaCaducidad || "";
     actualizarTotal();
     $("#aviso-editando").style.display = "flex";
-    $("#btn-guardar-registro").textContent = "Guardar cambios";
+    $("#btn-guardar-registro").innerHTML = ICONOS.guardar + "Guardar cambios";
     $("#btn-guardar-registro").scrollIntoView({behavior:"smooth", block:"center"});
   }
 
@@ -1180,11 +1221,11 @@ function renderRegistrar(){
       salirModoEdicion();
       await renderRecientes(art.codigo, entrarModoEdicion);
       btn.textContent = "✓ Guardado";
-      setTimeout(()=>{ btn.textContent = "Guardar registro"; btn.disabled = true; }, 900);
+      setTimeout(()=>{ btn.innerHTML = ICONOS.guardar + "Guardar registro"; btn.disabled = true; }, 900);
     }catch(e){
       console.error(e);
       alert("No se pudo guardar el registro: " + e.message);
-      btn.disabled = false; btn.textContent = editando ? "Guardar cambios" : "Guardar registro";
+      btn.disabled = false; btn.innerHTML = ICONOS.guardar + (editando ? "Guardar cambios" : "Guardar registro");
     }
   });
 
@@ -1207,8 +1248,8 @@ async function renderRecientes(codigo, onEditar){
           <div class="meta">${fmtFecha(r.fecha)} · ${r.usuario||""}${r.fechaCaducidad ? " · Caduca " + r.fechaCaducidad : ""}${r.editadoEn ? " · editado" : ""}</div>
         </div>
         <div style="display:flex;gap:4px;flex-shrink:0;">
-          <button class="btn-texto" style="padding:4px 6px;font-size:.72rem;" data-editar-id="${r._fileId}">Editar</button>
-          <button class="btn-borrar" data-id="${r._fileId}">Anular</button>
+          <button class="btn-texto" style="padding:4px 6px;font-size:.72rem;" data-editar-id="${r._fileId}">${ICONOS.lapiz}Editar</button>
+          <button class="btn-borrar" data-id="${r._fileId}">${ICONOS.papelera}Anular</button>
         </div>
       </div>`).join("");
     if (onEditar){
@@ -1264,7 +1305,7 @@ async function renderInventario(){
   if (!state.almacenActual){
     cont.innerHTML = `
       <div class="aviso info">Todavía no hay ningún almacén creado.</div>
-      <button class="btn-primario" id="btn-cta-crear-almacen">+ Crear almacén</button>`;
+      <button class="btn-primario" id="btn-cta-crear-almacen">${ICONOS.mas}Crear almacén</button>`;
     $("#btn-cta-crear-almacen").addEventListener("click", abrirCreadorAlmacen);
     return;
   }
@@ -1272,8 +1313,8 @@ async function renderInventario(){
     cont.innerHTML = `
       <div class="aviso info">Elige o crea un inventario (recuento) para ver su resumen en "${state.almacenActual}".</div>
       <div style="display:flex;flex-direction:column;gap:10px;">
-        ${state.inventarios.length ? '<button class="btn-secundario" id="btn-cta-abrir-inventario">Abrir inventario existente</button>' : ''}
-        <button class="btn-primario" id="btn-cta-crear-inventario">+ Nuevo inventario</button>
+        ${state.inventarios.length ? `<button class="btn-secundario" id="btn-cta-abrir-inventario">${ICONOS.carpeta}Abrir inventario existente</button>` : ''}
+        <button class="btn-primario" id="btn-cta-crear-inventario">${ICONOS.mas}Nuevo inventario</button>
       </div>`;
     $("#btn-cta-abrir-inventario")?.addEventListener("click", abrirSelectorInventario);
     $("#btn-cta-crear-inventario").addEventListener("click", abrirCreadorInventario);
@@ -1306,8 +1347,8 @@ async function renderInventario(){
 
   cont.innerHTML = `
     <div class="tabs-subvista">
-      <button class="tab-sub ${state.vistaInventarioSub==="resumen"?"activa":""}" id="btn-sub-resumen">Resumen</button>
-      <button class="tab-sub ${state.vistaInventarioSub==="diferencias"?"activa":""}" id="btn-sub-diferencias">Ver diferencias</button>
+      <button class="tab-sub ${state.vistaInventarioSub==="resumen"?"activa":""}" id="btn-sub-resumen"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M8 6h13M8 12h13M8 18h13M3 6h.01M3 12h.01M3 18h.01"/></svg>Resumen</button>
+      <button class="tab-sub ${state.vistaInventarioSub==="diferencias"?"activa":""}" id="btn-sub-diferencias"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 3H5a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h4"/><path d="M15 3h4a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2h-4"/><path d="M9 12h6"/></svg>Ver diferencias</button>
     </div>
     <div id="contenido-subvista"></div>
   `;
@@ -1338,7 +1379,7 @@ async function renderInventario(){
       </table>
     </div>
     <div style="font-size:.75rem;color:var(--texto-claro);margin:-6px 0 12px;">Toca un artículo para ver o editar sus registros.</div>
-    <button class="btn-secundario" id="btn-exportar">Exportar a Excel</button>
+    <button class="btn-secundario" id="btn-exportar">${ICONOS.descargar}Exportar a Excel</button>
     ` : `<div class="aviso info">Todavía no hay registros en este inventario.</div>`}
   `;
 
@@ -1418,7 +1459,7 @@ async function renderDiferencias(registros){
         </div>
         <div style="display:flex;gap:8px;">
           <input type="file" id="input-stock-sistema" accept=".xlsx,.xls" style="display:none;">
-          <button class="btn-secundario" id="btn-cargar-stock" style="width:auto;padding:9px 14px;">${stock ? "Reemplazar Excel" : "Cargar stock del sistema (Excel)"}</button>
+          <button class="btn-secundario" id="btn-cargar-stock" style="width:auto;padding:9px 14px;">${stock ? ICONOS.subir+"Reemplazar Excel" : ICONOS.subir+"Cargar stock del sistema (Excel)"}</button>
         </div>
       </div>
       <div style="font-size:.72rem;color:var(--texto-claro);margin-top:8px;">Formato esperado: código artículo, descripción, cantidad 00, cantidad 10, cantidad 20 (con encabezado).</div>
@@ -1488,7 +1529,7 @@ async function renderDiferencias(registros){
         <tbody></tbody>
       </table>
     </div>
-    <button class="btn-secundario" id="btn-exportar-diferencias">Exportar diferencias a Excel</button>
+    <button class="btn-secundario" id="btn-exportar-diferencias">${ICONOS.descargar}Exportar diferencias a Excel</button>
   `;
 
   function celdaDif(v){
@@ -1633,7 +1674,7 @@ document.addEventListener("DOMContentLoaded", async () => {
   });
 
   $("#btn-crear-inventario").addEventListener("click", async ()=>{
-    const nombre = sanitizeNombre($("#input-nuevo-inventario").value);
+    const nombre = sanitizeNombre(mesInventarioSeleccionado());
     const fechaInput = $("#input-fecha-inventario").value;
     if (!nombre) return;
     const btn = $("#btn-crear-inventario");
@@ -1647,7 +1688,7 @@ document.addEventListener("DOMContentLoaded", async () => {
         creadoEn: new Date().toISOString(),
       });
       $("#panel-nuevo-inventario").style.display = "none";
-      $("#input-nuevo-inventario").value = mesActual();
+      poblarSelectMes();
       $("#input-fecha-inventario").value = "";
       await cargarInventarios();
       $("#sel-inventario").value = nombre;
