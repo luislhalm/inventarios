@@ -1477,9 +1477,10 @@ async function renderDiferencias(registros){
           <div style="font-weight:700;font-size:.9rem;">Stock de sistema</div>
           <div style="font-size:.78rem;color:var(--texto-claro);">${stock ? `Cargado · ${stock.size} artículos` : "Todavía no se ha cargado ningún Excel para este inventario"}</div>
         </div>
-        <div style="display:flex;gap:8px;">
+        <div style="display:flex;flex-direction:column;gap:8px;align-items:stretch;">
           <input type="file" id="input-stock-sistema" accept=".xlsx,.xls" style="display:none;">
           <button class="btn-secundario" id="btn-cargar-stock" style="width:auto;padding:9px 14px;">${stock ? ICONOS.subir+"Reemplazar Excel" : ICONOS.subir+"Cargar stock del sistema (Excel)"}</button>
+          ${stock ? `<button class="btn-secundario" id="btn-exportar-diferencias" style="width:auto;padding:9px 14px;">${ICONOS.descargar}Exportar diferencias</button>` : ""}
         </div>
       </div>
       <div style="font-size:.72rem;color:var(--texto-claro);margin-top:8px;">Formato esperado: código artículo, descripción, cantidad 00, cantidad 10, cantidad 20 (con encabezado).</div>
@@ -1549,7 +1550,6 @@ async function renderDiferencias(registros){
         <tbody></tbody>
       </table>
     </div>
-    <button class="btn-secundario" id="btn-exportar-diferencias">${ICONOS.descargar}Exportar diferencias a Excel</button>
   `;
 
   function celdaDif(v){
