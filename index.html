@@ -742,14 +742,25 @@ async function graphBatch(requests){
   return resultados;
 }
 // Descarga el contenido de varios archivos a la vez (ver graphBatch).
-async function graphBatchContenidos(items){
-  const respuestas = await graphBatch(items.map(it => ({
-    id: it.id, method: "GET", url: `/drives/${state.driveId}/items/${it.id}/content`,
-  })));
+// El endpoint /content normalmente redirige (302) a una URL de descarga temporal, y esa
+// redirección NO se sigue dentro de $batch (por eso ahí no llegaba el contenido real).
+// En su lugar, pedimos la URL de descarga directa de cada archivo (@microsoft.graph.downloadUrl)
+// y las descargamos en paralelo con fetch normal, que sí sigue redirecciones.
+async function descargarContenidosParalelo(items, concurrencia=10){
   const resultados = new Map();
-  for (const [id, r] of respuestas){
-    if (r.status >= 200 && r.status < 300) resultados.set(id, r.body);
+  let indice = 0;
+  async function trabajador(){
+    while (indice < items.length){
+      const item = items[indice++];
+      const url = item["@microsoft.graph.downloadUrl"];
+      if (!url) continue;
+      try{
+        const res = await fetch(url);
+        if (res.ok) resultados.set(item.id, await res.json());
+      }catch(e){ /* si un archivo falla, se ignora y se sigue con el resto */ }
+    }
   }
+  await Promise.all(Array.from({ length: Math.min(concurrencia, items.length) }, trabajador));
   return resultados;
 }
 
@@ -1222,9 +1233,10 @@ async function cargarRegistros(){
   const carpeta = `${clave}/registros`;
   state.registrosIncompletosPorRed = false;
   try{
-    // Paginamos hasta traer TODOS los archivos, no solo los primeros (antes se cortaba en 999).
+    // Paginamos hasta traer TODOS los archivos, no solo los primeros (antes se cortaba en 999),
+    // pidiendo también la URL de descarga directa de cada uno.
     let items = [];
-    let url = `/drives/${state.driveId}/root:/${encPath(carpeta)}:/children?$top=200`;
+    let url = `/drives/${state.driveId}/root:/${encPath(carpeta)}:/children?$top=200&$select=id,name,file,lastModifiedDateTime,@microsoft.graph.downloadUrl`;
     while (url){
       const res = await graphFetch(url);
       const data = await res.json();
@@ -1232,8 +1244,9 @@ async function cargarRegistros(){
       url = data["@odata.nextLink"] || null;
     }
 
-    // Contenidos en lotes de 20 (Graph $batch) en vez de uno a uno.
-    const contenidos = await graphBatchContenidos(items);
+    // Contenidos en paralelo (descarga directa), en vez de uno a uno y en vez de $batch
+    // (que no sigue la redirección del endpoint de contenido).
+    const contenidos = await descargarContenidosParalelo(items);
     const registros = [];
     for (const item of items){
       const datos = contenidos.get(item.id);
