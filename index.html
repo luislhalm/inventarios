@@ -492,6 +492,8 @@ const state = {
   registrosCache: [],
   registrosCacheKey: "",
   sincronizando: false,
+  registrosSonCache: false,
+  inventariosSonCache: false,
 };
 
 let msalInstance;
@@ -929,17 +931,59 @@ let dbPromise = null;
 function abrirDB(){
   if (dbPromise) return dbPromise;
   dbPromise = new Promise((resolve, reject)=>{
-    const req = indexedDB.open(DB_NOMBRE, 1);
+    const req = indexedDB.open(DB_NOMBRE, 2);
     req.onupgradeneeded = () => {
       const db = req.result;
       if (!db.objectStoreNames.contains("cola")){
         db.createObjectStore("cola", { keyPath:"id", autoIncrement:true });
+      }
+      if (!db.objectStoreNames.contains("cache_inventarios")){
+        db.createObjectStore("cache_inventarios", { keyPath:"almacen" });
+      }
+      if (!db.objectStoreNames.contains("cache_registros")){
+        db.createObjectStore("cache_registros", { keyPath:"carpeta" });
       }
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
   return dbPromise;
+}
+// Guarda/lee una copia local de los inventarios de un almacén y de los registros de un
+// inventario concreto, para poder seguir viéndolos (y editándolos) si luego falla la red.
+async function cacheInventariosGuardar(almacen, inventarios, inventariosInfo){
+  const db = await abrirDB();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction("cache_inventarios","readwrite");
+    tx.objectStore("cache_inventarios").put({ almacen, inventarios, inventariosInfo, guardadoEn: Date.now() });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function cacheInventariosLeer(almacen){
+  const db = await abrirDB();
+  return new Promise((resolve, reject)=>{
+    const req = db.transaction("cache_inventarios","readonly").objectStore("cache_inventarios").get(almacen);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function cacheRegistrosGuardar(carpeta, registros){
+  const db = await abrirDB();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction("cache_registros","readwrite");
+    tx.objectStore("cache_registros").put({ carpeta, registros, guardadoEn: Date.now() });
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function cacheRegistrosLeer(carpeta){
+  const db = await abrirDB();
+  return new Promise((resolve, reject)=>{
+    const req = db.transaction("cache_registros","readonly").objectStore("cache_registros").get(carpeta);
+    req.onsuccess = () => resolve(req.result || null);
+    req.onerror = () => reject(req.error);
+  });
 }
 async function colaAgregar(op){
   const db = await abrirDB();
@@ -1116,26 +1160,41 @@ async function cargarRegistros(){
   if (state.registrosCacheKey === clave) return await mezclarConPendientes(state.registrosCache, clave);
 
   const carpeta = `${clave}/registros`;
-  let items = [];
+  state.registrosSonCache = false;
   try{
     const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}:/children?$top=999`);
-    items = (await res.json()).value.filter(i=>i.file);
-  }catch(e){
-    if (e.status !== 404) throw e;
-  }
+    const items = (await res.json()).value.filter(i=>i.file);
 
-  const registros = [];
-  for (const item of items){
-    try{
-      const c = await graphFetch(`/drives/${state.driveId}/items/${item.id}/content`);
-      const datos = await c.json();
-      registros.push({ ...datos, _fileId: item.id, _fileName: item.name, _modificado: item.lastModifiedDateTime });
-    }catch(e){ /* si un archivo falla, se ignora y se sigue con el resto */ }
+    const registros = [];
+    for (const item of items){
+      try{
+        const c = await graphFetch(`/drives/${state.driveId}/items/${item.id}/content`);
+        const datos = await c.json();
+        registros.push({ ...datos, _fileId: item.id, _fileName: item.name, _modificado: item.lastModifiedDateTime });
+      }catch(e){ /* si un archivo falla, se ignora y se sigue con el resto */ }
+    }
+    registros.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+    state.registrosCache = registros;
+    state.registrosCacheKey = clave;
+    cacheRegistrosGuardar(carpeta, registros).catch(()=>{}); // copia local por si luego falla la red
+    return await mezclarConPendientes(registros, clave);
+  }catch(e){
+    if (e.status === 404){
+      state.registrosCache = [];
+      state.registrosCacheKey = clave;
+      cacheRegistrosGuardar(carpeta, []).catch(()=>{});
+      return await mezclarConPendientes([], clave);
+    }
+    if (esErrorDeRed(e)){
+      const cache = await cacheRegistrosLeer(carpeta).catch(()=>null);
+      if (cache){
+        state.registrosSonCache = true;
+        // OJO: no fijamos registrosCacheKey, así en cuanto vuelva la red se reintenta solo.
+        return await mezclarConPendientes(cache.registros, clave);
+      }
+    }
+    throw e;
   }
-  registros.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
-  state.registrosCache = registros;
-  state.registrosCacheKey = clave;
-  return await mezclarConPendientes(registros, clave);
 }
 
 async function borrarRegistro(fileId){
@@ -1186,7 +1245,7 @@ async function cargarAlmacenes(){
     sel.value = state.almacenActual;
     // Nos aseguramos de que la carpeta de ese almacén existe en SharePoint
     // (antes se creaba con el botón "+ Nuevo almacén"; ahora se crea sola).
-    await ensureFolder(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`);
+    await ensureFolder(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`).catch(e=>{ if (!esErrorDeRed(e)) console.error(e); });
     await cargarInventarios();
   } else {
     state.almacenActual = "";
@@ -1198,11 +1257,26 @@ async function cargarAlmacenes(){
 
 async function cargarInventarios(){
   if (!state.almacenActual){ $("#sel-inventario").innerHTML = ""; return renderVista(); }
-  state.inventarios = await listChildFolders(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`);
-  state.inventariosInfo = {};
-  for (const nombre of state.inventarios){
-    const carpeta = `${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`;
-    state.inventariosInfo[nombre] = await leerInfoInventario(carpeta);
+  state.inventariosSonCache = false;
+  try{
+    state.inventarios = await listChildFolders(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`);
+    state.inventariosInfo = {};
+    for (const nombre of state.inventarios){
+      const carpeta = `${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`;
+      state.inventariosInfo[nombre] = await leerInfoInventario(carpeta);
+    }
+    cacheInventariosGuardar(state.almacenActual, state.inventarios, state.inventariosInfo).catch(()=>{});
+  }catch(e){
+    if (!esErrorDeRed(e)) throw e;
+    const cache = await cacheInventariosLeer(state.almacenActual).catch(()=>null);
+    if (cache){
+      state.inventarios = cache.inventarios;
+      state.inventariosInfo = cache.inventariosInfo;
+      state.inventariosSonCache = true;
+    } else {
+      state.inventarios = [];
+      state.inventariosInfo = {};
+    }
   }
   const sel = $("#sel-inventario");
   sel.innerHTML = state.inventarios.map(i=>{
@@ -1529,7 +1603,9 @@ async function renderRecientes(codigo, onEditar){
       });
     });
   }catch(e){
-    cont.innerHTML = `<div class="aviso error">No se pudieron cargar los registros recientes.</div>`;
+    cont.innerHTML = esErrorDeRed(e)
+      ? `<div class="aviso info">Sin conexión y todavía no hay copia guardada de los registros de este artículo en el dispositivo.</div>`
+      : `<div class="aviso error">No se pudieron cargar los registros recientes.</div>`;
   }
 }
 
@@ -1584,7 +1660,9 @@ async function renderInventario(){
   try{
     registros = await cargarRegistros();
   }catch(e){
-    cont.innerHTML = `<div class="aviso error">No se pudo cargar el inventario: ${e.message}</div>`;
+    cont.innerHTML = esErrorDeRed(e)
+      ? `<div class="aviso error">Sin conexión y todavía no hay ninguna copia guardada de este inventario en el dispositivo. Ábrelo una vez con conexión para poder consultarlo luego sin ella.</div>`
+      : `<div class="aviso error">No se pudo cargar el inventario: ${e.message}</div>`;
     return;
   }
 
@@ -1620,6 +1698,7 @@ async function renderInventario(){
 
   const sub = $("#contenido-subvista");
   sub.innerHTML = `
+    ${state.registrosSonCache ? `<div class="aviso info">Sin conexión: mostrando la última copia guardada en este dispositivo. Puede no incluir lo más reciente de otros usuarios.</div>` : ""}
     <div class="resumen-cabecera">
       <div class="chip-metrica"><div class="num">${filas.length}</div><div class="lbl">Artículos</div></div>
       <div class="chip-metrica"><div class="num">${registros.length}</div><div class="lbl">Registros</div></div>
@@ -1893,7 +1972,7 @@ document.addEventListener("DOMContentLoaded", async () => {
     state.articuloSeleccionado = null;
     state.editandoId = null;
     state.vistaInventarioSub = "resumen";
-    await ensureFolder(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`);
+    await ensureFolder(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`).catch(e=>{ if (!esErrorDeRed(e)) console.error(e); });
     await cargarInventarios();
   });
 
