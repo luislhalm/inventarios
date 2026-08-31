@@ -387,6 +387,7 @@ nav.tabs svg{width:22px;height:22px;}
     <div class="estado-conexion" id="estado-conexion">
       <span class="punto"></span> Conectando con SharePoint…
     </div>
+    <div class="estado-conexion" id="panel-pendientes" style="display:none;"></div>
   </header>
 
   <main id="contenido"></main>
@@ -490,6 +491,7 @@ const state = {
   editandoId: null,
   registrosCache: [],
   registrosCacheKey: "",
+  sincronizando: false,
 };
 
 let msalInstance;
@@ -919,6 +921,173 @@ async function cargarStockSistema(){
   }
 }
 
+/* ============================================================
+   OFFLINE — cola de sincronización (IndexedDB)
+   ============================================================ */
+const DB_NOMBRE = "inventarios_capa_offline";
+let dbPromise = null;
+function abrirDB(){
+  if (dbPromise) return dbPromise;
+  dbPromise = new Promise((resolve, reject)=>{
+    const req = indexedDB.open(DB_NOMBRE, 1);
+    req.onupgradeneeded = () => {
+      const db = req.result;
+      if (!db.objectStoreNames.contains("cola")){
+        db.createObjectStore("cola", { keyPath:"id", autoIncrement:true });
+      }
+    };
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+  return dbPromise;
+}
+async function colaAgregar(op){
+  const db = await abrirDB();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction("cola","readwrite");
+    const req = tx.objectStore("cola").add(op);
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function colaListar(){
+  const db = await abrirDB();
+  return new Promise((resolve, reject)=>{
+    const req = db.transaction("cola","readonly").objectStore("cola").getAll();
+    req.onsuccess = () => resolve(req.result);
+    req.onerror = () => reject(req.error);
+  });
+}
+async function colaEliminar(id){
+  const db = await abrirDB();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction("cola","readwrite");
+    tx.objectStore("cola").delete(id);
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+async function colaActualizar(id, cambios){
+  const db = await abrirDB();
+  return new Promise((resolve, reject)=>{
+    const tx = db.transaction("cola","readwrite");
+    const store = tx.objectStore("cola");
+    const getReq = store.get(id);
+    getReq.onsuccess = () => { if (getReq.result) store.put({ ...getReq.result, ...cambios }); };
+    tx.oncomplete = () => resolve();
+    tx.onerror = () => reject(tx.error);
+  });
+}
+// Heurística para distinguir "sin conexión" de un error real (permisos, etc.)
+function esErrorDeRed(e){
+  if (typeof navigator !== "undefined" && navigator.onLine === false) return true;
+  if (e instanceof TypeError) return true;
+  return /failed to fetch|networkerror|network request failed|load failed/i.test(String(e?.message || e || ""));
+}
+
+async function mezclarConPendientes(registrosBase, carpetaClave){
+  let cola = [];
+  try{ cola = await colaListar(); }catch(e){ return registrosBase; }
+  const carpetaRegistros = `${carpetaClave}/registros`;
+  const pendientes = cola.filter(op => op.carpeta === carpetaRegistros);
+  if (!pendientes.length) return registrosBase;
+  let resultado = registrosBase.map(r => ({...r}));
+  for (const op of pendientes){
+    if (op.tipo === "crear"){
+      resultado.push({ ...op.registro, _fileId: `pendiente-${op.id}`, _fileName: op.nombreArchivo, _pendiente:true, _estadoCola: op.estado });
+    } else if (op.tipo === "editar"){
+      const idx = resultado.findIndex(r => r._fileId === op.fileId);
+      if (idx >= 0) resultado[idx] = { ...resultado[idx], ...op.registro, _pendiente:true, _estadoCola: op.estado };
+      else resultado.push({ ...op.registro, _fileId: op.fileId, _pendiente:true, _estadoCola: op.estado });
+    }
+  }
+  resultado.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
+  return resultado;
+}
+
+async function sincronizarPendientes(){
+  if (state.sincronizando || !state.driveId) return;
+  state.sincronizando = true;
+  try{
+    const cola = await colaListar();
+    for (const op of cola){
+      if (op.estado === "conflicto") continue;
+      try{
+        if (op.tipo === "crear"){
+          await ensureFolder(op.carpeta);
+          await graphFetch(`/drives/${state.driveId}/root:/${encPath(op.carpeta)}/${op.nombreArchivo}:/content`, {
+            method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify(op.registro),
+          });
+          await colaEliminar(op.id);
+        } else if (op.tipo === "editar"){
+          let actual = null;
+          try{
+            const r = await graphFetch(`/drives/${state.driveId}/items/${op.fileId}`);
+            actual = await r.json();
+          }catch(e){
+            if (e.status === 404){ await colaActualizar(op.id, { estado:"conflicto", motivo:"borrado" }); continue; }
+            throw e;
+          }
+          if (op.modificadoConocido && actual.lastModifiedDateTime !== op.modificadoConocido){
+            await colaActualizar(op.id, { estado:"conflicto", motivo:"editado" });
+            continue;
+          }
+          await graphFetch(`/drives/${state.driveId}/items/${op.fileId}/content`, {
+            method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify(op.registro),
+          });
+          await colaEliminar(op.id);
+        }
+        state.registrosCacheKey = "";
+      }catch(e){
+        console.error("Error sincronizando pendiente:", e);
+        if (esErrorDeRed(e)) break; // seguimos sin conexión: lo reintentamos más tarde
+      }
+    }
+  } finally {
+    state.sincronizando = false;
+    await actualizarBadgePendientes();
+  }
+}
+
+async function actualizarBadgePendientes(){
+  const el = $("#panel-pendientes");
+  if (!el) return;
+  let cola = [];
+  try{ cola = await colaListar(); }catch(e){ return; }
+  if (!cola.length){ el.style.display = "none"; return; }
+  const conflictos = cola.filter(o=>o.estado==="conflicto");
+  const pendientes = cola.length - conflictos.length;
+  el.style.display = "flex";
+  el.innerHTML = `
+    <span class="punto ${conflictos.length ? "error" : ""}"></span>
+    ${pendientes ? `${pendientes} registro${pendientes===1?"":"s"} pendiente${pendientes===1?"":"s"} de subir` : ""}
+    ${conflictos.length ? ` · ${conflictos.length} con conflicto` : ""}
+    <button class="btn-texto" id="btn-sincronizar-ahora" style="padding:2px 6px;">${ICONOS.subir}Sincronizar</button>
+    ${conflictos.length ? `<button class="btn-texto" id="btn-ver-conflictos" style="padding:2px 6px;color:var(--capa-rojo);">Resolver conflictos</button>` : ""}
+  `;
+  $("#btn-sincronizar-ahora")?.addEventListener("click", ()=> sincronizarPendientes());
+  $("#btn-ver-conflictos")?.addEventListener("click", mostrarConflictos);
+}
+
+async function mostrarConflictos(){
+  const cola = await colaListar();
+  for (const op of cola.filter(o=>o.estado==="conflicto")){
+    const motivo = op.motivo === "borrado"
+      ? "el registro fue anulado por otra persona mientras estabas sin conexión"
+      : "otra persona modificó este mismo registro mientras estabas sin conexión";
+    const mantener = confirm(
+      `Conflicto en "${op.registro.codigo} - ${op.registro.descripcion}":\n${motivo}.\n\n` +
+      `Aceptar = mantener TU cambio (se sube y sobrescribe lo que hay en SharePoint)\n` +
+      `Cancelar = descartar tu cambio y quedarte con lo que ya hay en SharePoint`
+    );
+    if (mantener) await colaActualizar(op.id, { estado:"pendiente", modificadoConocido:null });
+    else await colaEliminar(op.id);
+  }
+  state.registrosCacheKey = "";
+  await actualizarBadgePendientes();
+  await sincronizarPendientes();
+}
+
 async function guardarRegistro(registro){
   const carpeta = `${carpetaInventario()}/registros`;
   await ensureFolder(carpeta);
@@ -944,7 +1113,7 @@ async function actualizarRegistro(fileId, registro){
 
 async function cargarRegistros(){
   const clave = carpetaInventario();
-  if (state.registrosCacheKey === clave) return state.registrosCache;
+  if (state.registrosCacheKey === clave) return await mezclarConPendientes(state.registrosCache, clave);
 
   const carpeta = `${clave}/registros`;
   let items = [];
@@ -960,16 +1129,22 @@ async function cargarRegistros(){
     try{
       const c = await graphFetch(`/drives/${state.driveId}/items/${item.id}/content`);
       const datos = await c.json();
-      registros.push({ ...datos, _fileId: item.id, _fileName: item.name });
+      registros.push({ ...datos, _fileId: item.id, _fileName: item.name, _modificado: item.lastModifiedDateTime });
     }catch(e){ /* si un archivo falla, se ignora y se sigue con el resto */ }
   }
   registros.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
   state.registrosCache = registros;
   state.registrosCacheKey = clave;
-  return registros;
+  return await mezclarConPendientes(registros, clave);
 }
 
 async function borrarRegistro(fileId){
+  if (typeof fileId === "string" && fileId.startsWith("pendiente-")){
+    await colaEliminar(Number(fileId.replace("pendiente-","")));
+    state.registrosCacheKey = "";
+    await actualizarBadgePendientes();
+    return;
+  }
   await graphFetch(`/drives/${state.driveId}/items/${fileId}`, { method:"DELETE" });
   state.registrosCacheKey = "";
 }
@@ -992,6 +1167,8 @@ async function arrancarApp(account){
     await loadAlmacenesMaestro();
     setEstado(`Conectado · ${state.articulos.length} artículos · ${state.almacenesMaestro.length} almacenes`, "ok");
     await cargarAlmacenes();
+    await actualizarBadgePendientes();
+    sincronizarPendientes(); // por si hay registros guardados sin conexión de una sesión anterior
   }catch(e){
     console.error(e);
     setEstado("Error de conexión — revisa la CONFIG (ver detalle abajo)", "error");
@@ -1216,12 +1393,15 @@ function renderRegistrar(){
     const ubicacion = $("#sel-ubicacion").value;
     const fechaCaducidad = $("#input-caducidad").value || null;
     const editando = !!state.editandoId;
+    const editandoPendienteLocal = editando && typeof state.editandoId === "string" && state.editandoId.startsWith("pendiente-");
 
     const btn = $("#btn-guardar-registro");
     btn.disabled = true; btn.textContent = editando ? "Guardando cambios…" : "Guardando…";
     try{
+      const registrosActuales = await cargarRegistros();
+      const original = editando ? registrosActuales.find(r=>r._fileId===state.editandoId) : null;
       const registro = {
-        fecha: editando ? (await cargarRegistros()).find(r=>r._fileId===state.editandoId)?.fecha || new Date().toISOString() : new Date().toISOString(),
+        fecha: editando ? (original?.fecha || new Date().toISOString()) : new Date().toISOString(),
         usuario: state.account.name || state.account.username,
         usuarioEmail: state.account.username,
         almacen: state.almacenActual,
@@ -1235,8 +1415,13 @@ function renderRegistrar(){
         unidadBase,
         totalUnidadBase,
       };
-      if (editando){
-        registro.editadoEn = new Date().toISOString();
+      if (editando) registro.editadoEn = new Date().toISOString();
+
+      if (editandoPendienteLocal){
+        // Todavía no se ha subido a SharePoint: solo actualizamos el registro dentro de la cola local.
+        await colaActualizar(Number(state.editandoId.replace("pendiente-","")), { registro });
+        state.registrosCacheKey = "";
+      } else if (editando){
         await actualizarRegistro(state.editandoId, registro);
       } else {
         await guardarRegistro(registro);
@@ -1247,8 +1432,61 @@ function renderRegistrar(){
       setTimeout(()=>{ btn.innerHTML = ICONOS.guardar + "Guardar registro"; btn.disabled = true; }, 900);
     }catch(e){
       console.error(e);
-      alert("No se pudo guardar el registro: " + e.message);
-      btn.disabled = false; btn.innerHTML = ICONOS.guardar + (editando ? "Guardar cambios" : "Guardar registro");
+      if (!editandoPendienteLocal && esErrorDeRed(e)){
+        // Sin conexión: lo guardamos en el dispositivo y se subirá solo cuando vuelva la señal.
+        try{
+          const carpeta = `${carpetaInventario()}/registros`;
+          const registro = {
+            fecha: editando ? (await cargarRegistros()).find(r=>r._fileId===state.editandoId)?.fecha || new Date().toISOString() : new Date().toISOString(),
+            usuario: state.account.name || state.account.username,
+            usuarioEmail: state.account.username,
+            almacen: state.almacenActual,
+            inventario: state.inventarioActual,
+            codigo: art.codigo,
+            descripcion: art.descripcion,
+            ubicacion, fechaCaducidad, detalle,
+            totalToneladas: total, unidadBase, totalUnidadBase,
+          };
+          if (editando){
+            registro.editadoEn = new Date().toISOString();
+            const cola = await colaListar();
+            const existente = cola.find(o => o.tipo==="editar" && o.fileId===state.editandoId && o.estado==="pendiente");
+            if (existente){
+              // Ya había una edición offline de este mismo registro sin subir: la actualizamos
+              // en vez de duplicarla, conservando el "modificadoConocido" original para el conflicto.
+              await colaActualizar(existente.id, { registro });
+            } else {
+              const original2 = (await cargarRegistros()).find(r=>r._fileId===state.editandoId);
+              await colaAgregar({
+                tipo:"editar", fileId: state.editandoId, modificadoConocido: original2?._modificado || null,
+                carpeta, registro, almacen: state.almacenActual, inventario: state.inventarioActual,
+                estado:"pendiente", creadoEn: new Date().toISOString(),
+              });
+            }
+          } else {
+            const sufijo = Math.random().toString(36).slice(2,7);
+            const nombreArchivo = `${Date.now()}_${sufijo}_${sanitizeNombre(registro.codigo)}.json`;
+            await colaAgregar({
+              tipo:"crear", nombreArchivo, carpeta, registro,
+              almacen: state.almacenActual, inventario: state.inventarioActual,
+              estado:"pendiente", creadoEn: new Date().toISOString(),
+            });
+          }
+          state.registrosCacheKey = "";
+          salirModoEdicion();
+          await renderRecientes(art.codigo, entrarModoEdicion);
+          await actualizarBadgePendientes();
+          btn.textContent = "✓ Guardado sin conexión";
+          setTimeout(()=>{ btn.innerHTML = ICONOS.guardar + "Guardar registro"; btn.disabled = true; }, 1400);
+        }catch(e2){
+          console.error(e2);
+          alert("No se pudo guardar ni siquiera en este dispositivo: " + e2.message);
+          btn.disabled = false; btn.innerHTML = ICONOS.guardar + (editando ? "Guardar cambios" : "Guardar registro");
+        }
+      } else {
+        alert("No se pudo guardar el registro: " + e.message);
+        btn.disabled = false; btn.innerHTML = ICONOS.guardar + (editando ? "Guardar cambios" : "Guardar registro");
+      }
     }
   });
 
@@ -1267,7 +1505,7 @@ async function renderRecientes(codigo, onEditar){
     cont.innerHTML = registros.map(r=>`
       <div class="fila-detalle-registro">
         <div>
-          <div>${r.totalUnidadBase!=null ? fmtCantidad(r.totalUnidadBase)+" "+r.unidadBase : fmtTon(r.totalToneladas)+" Ton"}${r.ubicacion ? ` · Ubic. ${r.ubicacion}` : ""}</div>
+          <div>${r.totalUnidadBase!=null ? fmtCantidad(r.totalUnidadBase)+" "+r.unidadBase : fmtTon(r.totalToneladas)+" Ton"}${r.ubicacion ? ` · Ubic. ${r.ubicacion}` : ""}${r._pendiente ? ` <span style="color:var(--capa-naranja);font-weight:700;">· ${r._estadoCola==="conflicto"?"conflicto":"pendiente de subir"}</span>` : ""}</div>
           <div class="meta">${fmtFecha(r.fecha)} · ${r.usuario||""}${r.fechaCaducidad ? " · Caduca " + r.fechaCaducidad : ""}${r.editadoEn ? " · editado" : ""}</div>
         </div>
         <div style="display:flex;gap:4px;flex-shrink:0;">
@@ -1616,6 +1854,10 @@ document.addEventListener("DOMContentLoaded", async () => {
   $("#btn-login").addEventListener("click", login);
   $("#btn-logout").addEventListener("click", logout);
   poblarSelectMes();
+
+  // Reintenta subir lo pendiente en cuanto detecta conexión, y cada poco tiempo por si acaso.
+  window.addEventListener("online", () => sincronizarPendientes());
+  setInterval(() => { if (navigator.onLine) sincronizarPendientes(); }, 30000);
 
   await window.__cargaLibs; // espera a que terminen los intentos de carga de librerías
 
