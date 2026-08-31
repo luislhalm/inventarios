@@ -492,8 +492,7 @@ const state = {
   registrosCache: [],
   registrosCacheKey: "",
   sincronizando: false,
-  registrosSonCache: false,
-  inventariosSonCache: false,
+  registrosIncompletosPorRed: false,
 };
 
 let msalInstance;
@@ -701,7 +700,8 @@ async function getToken(){
    ============================================================ */
 async function graphFetch(path, options={}){
   const token = await getToken();
-  const res = await fetch(`https://graph.microsoft.com/v1.0${path}`, {
+  const url = path.startsWith("http") ? path : `https://graph.microsoft.com/v1.0${path}`;
+  const res = await fetch(url, {
     ...options,
     headers: { "Authorization": `Bearer ${token}`, ...(options.headers||{}) },
   });
@@ -712,6 +712,45 @@ async function graphFetch(path, options={}){
     throw err;
   }
   return res;
+}
+// Ejecuta varias peticiones a Graph en lotes de 20 vía $batch (lecturas, borrados o
+// escrituras), en vez de una petición por archivo — mucho más rápido con cientos/miles.
+async function graphBatch(requests){
+  const resultados = new Map();
+  const LOTE = 20;
+  for (let i = 0; i < requests.length; i += LOTE){
+    const lote = requests.slice(i, i + LOTE);
+    const cuerpo = { requests: lote.map(r => ({
+      id: r.id, method: r.method, url: r.url,
+      ...(r.body !== undefined ? { body: r.body, headers: { "Content-Type": "application/json" } } : {}),
+    })) };
+    let intentos = 0;
+    while (true){
+      const res = await graphFetch("/$batch", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(cuerpo),
+      });
+      const datos = await res.json();
+      const hayThrottling = datos.responses.some(r => r.status === 429);
+      for (const r of datos.responses) resultados.set(r.id, r);
+      if (!hayThrottling || intentos >= 3) break;
+      intentos++;
+      await new Promise(res2 => setTimeout(res2, 1500 * intentos)); // esperamos y reintentamos ese lote
+    }
+  }
+  return resultados;
+}
+// Descarga el contenido de varios archivos a la vez (ver graphBatch).
+async function graphBatchContenidos(items){
+  const respuestas = await graphBatch(items.map(it => ({
+    id: it.id, method: "GET", url: `/drives/${state.driveId}/items/${it.id}/content`,
+  })));
+  const resultados = new Map();
+  for (const [id, r] of respuestas){
+    if (r.status >= 200 && r.status < 300) resultados.set(id, r.body);
+  }
+  return resultados;
 }
 
 async function resolveSiteAndDrive(){
@@ -937,53 +976,14 @@ function abrirDB(){
       if (!db.objectStoreNames.contains("cola")){
         db.createObjectStore("cola", { keyPath:"id", autoIncrement:true });
       }
-      if (!db.objectStoreNames.contains("cache_inventarios")){
-        db.createObjectStore("cache_inventarios", { keyPath:"almacen" });
-      }
-      if (!db.objectStoreNames.contains("cache_registros")){
-        db.createObjectStore("cache_registros", { keyPath:"carpeta" });
-      }
+      // (No guardamos aquí una copia amplia de inventarios/registros a propósito: con 40
+      // almacenes y recuentos mensuales crecería sin control. Solo persiste la cola de
+      // pendientes, que es lo mínimo necesario para no perder trabajo sin conexión.)
     };
     req.onsuccess = () => resolve(req.result);
     req.onerror = () => reject(req.error);
   });
   return dbPromise;
-}
-// Guarda/lee una copia local de los inventarios de un almacén y de los registros de un
-// inventario concreto, para poder seguir viéndolos (y editándolos) si luego falla la red.
-async function cacheInventariosGuardar(almacen, inventarios, inventariosInfo){
-  const db = await abrirDB();
-  return new Promise((resolve, reject)=>{
-    const tx = db.transaction("cache_inventarios","readwrite");
-    tx.objectStore("cache_inventarios").put({ almacen, inventarios, inventariosInfo, guardadoEn: Date.now() });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-async function cacheInventariosLeer(almacen){
-  const db = await abrirDB();
-  return new Promise((resolve, reject)=>{
-    const req = db.transaction("cache_inventarios","readonly").objectStore("cache_inventarios").get(almacen);
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror = () => reject(req.error);
-  });
-}
-async function cacheRegistrosGuardar(carpeta, registros){
-  const db = await abrirDB();
-  return new Promise((resolve, reject)=>{
-    const tx = db.transaction("cache_registros","readwrite");
-    tx.objectStore("cache_registros").put({ carpeta, registros, guardadoEn: Date.now() });
-    tx.oncomplete = () => resolve();
-    tx.onerror = () => reject(tx.error);
-  });
-}
-async function cacheRegistrosLeer(carpeta){
-  const db = await abrirDB();
-  return new Promise((resolve, reject)=>{
-    const req = db.transaction("cache_registros","readonly").objectStore("cache_registros").get(carpeta);
-    req.onsuccess = () => resolve(req.result || null);
-    req.onerror = () => reject(req.error);
-  });
 }
 async function colaAgregar(op){
   const db = await abrirDB();
@@ -1132,6 +1132,66 @@ async function mostrarConflictos(){
   await sincronizarPendientes();
 }
 
+// Quita los metadatos internos (_fileId, _pendiente...) antes de meter un registro en un
+// archivo consolidado o de recrearlo como archivo individual.
+function datosLimpios(r){
+  const { _fileId, _fileName, _modificado, _archivado, _pendiente, _estadoCola, ...limpio } = r;
+  return limpio;
+}
+
+// Agrupa en un único archivo todos los registros individuales (no archivados, no pendientes)
+// del inventario actual, y borra exactamente los archivos que se han metido dentro.
+async function archivarInventario(){
+  const todos = await cargarRegistros();
+  const individuales = todos.filter(r => !r._archivado && !r._pendiente);
+  if (!individuales.length){
+    alert("No hay registros individuales para archivar en este inventario (puede que ya estén todos archivados).");
+    return false;
+  }
+  if (!confirm(`Se van a agrupar ${individuales.length} registros en un único archivo para aligerar el inventario.\n\nPodrás deshacerlo más adelante (se reabre automáticamente en cuanto intentes editar o anular algo de dentro).\n\n¿Continuar?`)){
+    return false;
+  }
+
+  const carpeta = `${carpetaInventario()}/registros`;
+  const sufijo = Math.random().toString(36).slice(2,7);
+  const nombreArchivo = `_archivado_${Date.now()}_${sufijo}.json`;
+  await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/${nombreArchivo}:/content`, {
+    method:"PUT",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(individuales.map(datosLimpios)),
+  });
+
+  // Borramos exactamente los archivos que acabamos de meter en el consolidado (por su ID),
+  // nunca "todo lo que haya en la carpeta" — así un registro nuevo que llegue justo en este
+  // instante no se pierde, simplemente queda suelto para el próximo archivado.
+  const idsUnicos = [...new Set(individuales.map(r=>r._fileId))];
+  await graphBatch(idsUnicos.map(id => ({ id, method:"DELETE", url:`/drives/${state.driveId}/items/${id}` })));
+
+  state.registrosCacheKey = "";
+  return true;
+}
+
+// Deshace un archivo consolidado: recrea cada registro como archivo individual y borra el consolidado.
+async function reabrirConsolidado(fileId){
+  const res = await graphFetch(`/drives/${state.driveId}/items/${fileId}/content`);
+  const datos = await res.json();
+  const carpeta = `${carpetaInventario()}/registros`;
+
+  const peticiones = datos.map((r, i) => {
+    const sufijo = Math.random().toString(36).slice(2,7) + i;
+    const nombreArchivo = `${Date.now()}_${sufijo}_${sanitizeNombre(r.codigo || "reg")}.json`;
+    return {
+      id: `crear-${i}`, method:"PUT",
+      url: `/drives/${state.driveId}/root:/${encPath(carpeta)}/${nombreArchivo}:/content`,
+      body: datosLimpios(r),
+    };
+  });
+  await graphBatch(peticiones);
+  await graphFetch(`/drives/${state.driveId}/items/${fileId}`, { method:"DELETE" });
+
+  state.registrosCacheKey = "";
+}
+
 async function guardarRegistro(registro){
   const carpeta = `${carpetaInventario()}/registros`;
   await ensureFolder(carpeta);
@@ -1160,38 +1220,49 @@ async function cargarRegistros(){
   if (state.registrosCacheKey === clave) return await mezclarConPendientes(state.registrosCache, clave);
 
   const carpeta = `${clave}/registros`;
-  state.registrosSonCache = false;
+  state.registrosIncompletosPorRed = false;
   try{
-    const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}:/children?$top=999`);
-    const items = (await res.json()).value.filter(i=>i.file);
+    // Paginamos hasta traer TODOS los archivos, no solo los primeros (antes se cortaba en 999).
+    let items = [];
+    let url = `/drives/${state.driveId}/root:/${encPath(carpeta)}:/children?$top=200`;
+    while (url){
+      const res = await graphFetch(url);
+      const data = await res.json();
+      items = items.concat(data.value.filter(i=>i.file));
+      url = data["@odata.nextLink"] || null;
+    }
 
+    // Contenidos en lotes de 20 (Graph $batch) en vez de uno a uno.
+    const contenidos = await graphBatchContenidos(items);
     const registros = [];
     for (const item of items){
-      try{
-        const c = await graphFetch(`/drives/${state.driveId}/items/${item.id}/content`);
-        const datos = await c.json();
-        registros.push({ ...datos, _fileId: item.id, _fileName: item.name, _modificado: item.lastModifiedDateTime });
-      }catch(e){ /* si un archivo falla, se ignora y se sigue con el resto */ }
+      const datos = contenidos.get(item.id);
+      if (!datos) continue;
+      if (Array.isArray(datos)){
+        // Archivo consolidado (varios registros archivados juntos en un mismo archivo).
+        for (const r of datos){
+          registros.push({ ...r, _fileId: item.id, _fileName: item.name, _modificado: item.lastModifiedDateTime, _archivado: true });
+        }
+      } else {
+        registros.push({ ...datos, _fileId: item.id, _fileName: item.name, _modificado: item.lastModifiedDateTime, _archivado: false });
+      }
     }
     registros.sort((a,b)=> new Date(b.fecha) - new Date(a.fecha));
     state.registrosCache = registros;
     state.registrosCacheKey = clave;
-    cacheRegistrosGuardar(carpeta, registros).catch(()=>{}); // copia local por si luego falla la red
     return await mezclarConPendientes(registros, clave);
   }catch(e){
     if (e.status === 404){
       state.registrosCache = [];
       state.registrosCacheKey = clave;
-      cacheRegistrosGuardar(carpeta, []).catch(()=>{});
       return await mezclarConPendientes([], clave);
     }
     if (esErrorDeRed(e)){
-      const cache = await cacheRegistrosLeer(carpeta).catch(()=>null);
-      if (cache){
-        state.registrosSonCache = true;
-        // OJO: no fijamos registrosCacheKey, así en cuanto vuelva la red se reintenta solo.
-        return await mezclarConPendientes(cache.registros, clave);
-      }
+      // Sin conexión: no intentamos mantener una copia completa en el dispositivo (con 40
+      // almacenes y recuentos mensuales crecería sin control). Mostramos únicamente lo que
+      // tú mismo has registrado en este dispositivo y todavía no se ha subido.
+      state.registrosIncompletosPorRed = true;
+      return await mezclarConPendientes([], clave);
     }
     throw e;
   }
@@ -1257,7 +1328,6 @@ async function cargarAlmacenes(){
 
 async function cargarInventarios(){
   if (!state.almacenActual){ $("#sel-inventario").innerHTML = ""; return renderVista(); }
-  state.inventariosSonCache = false;
   try{
     state.inventarios = await listChildFolders(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`);
     state.inventariosInfo = {};
@@ -1265,17 +1335,14 @@ async function cargarInventarios(){
       const carpeta = `${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`;
       state.inventariosInfo[nombre] = await leerInfoInventario(carpeta);
     }
-    cacheInventariosGuardar(state.almacenActual, state.inventarios, state.inventariosInfo).catch(()=>{});
   }catch(e){
     if (!esErrorDeRed(e)) throw e;
-    const cache = await cacheInventariosLeer(state.almacenActual).catch(()=>null);
-    if (cache){
-      state.inventarios = cache.inventarios;
-      state.inventariosInfo = cache.inventariosInfo;
-      state.inventariosSonCache = true;
-    } else {
-      state.inventarios = [];
-      state.inventariosInfo = {};
+    // Sin conexión: no mantenemos una copia aparte de "todos los inventarios de este almacén"
+    // (con 40 almacenes crecería mucho para poco beneficio real). Si ya tenías uno abierto,
+    // lo dejamos tal cual para poder seguir registrando en él.
+    if (!state.inventarios.length){
+      $("#contenido").innerHTML = `<div class="aviso error">Sin conexión: no se puede consultar la lista de inventarios de este almacén. Si ya tenías uno abierto antes de perder la conexión, puedes seguir registrando en él.</div>`;
+      return;
     }
   }
   const sel = $("#sel-inventario");
@@ -1571,41 +1638,69 @@ async function renderRecientes(codigo, onEditar){
   const cont = $("#lista-recientes");
   if (!cont) return;
   try{
-    const registros = (await cargarRegistros()).filter(r=>r.codigo === codigo).slice(0,8);
+    const todos = await cargarRegistros();
+    const registros = todos.filter(r=>r.codigo === codigo).slice(0,8);
+    const notaOffline = state.registrosIncompletosPorRed
+      ? `<div style="font-size:.72rem;color:var(--capa-naranja);margin-bottom:8px;">Sin conexión: solo se ven los pendientes de este dispositivo.</div>` : "";
     if (!registros.length){
-      cont.innerHTML = `<div class="centro">Sin registros todavía para este artículo</div>`;
+      cont.innerHTML = notaOffline + `<div class="centro">Sin registros todavía para este artículo</div>`;
       return;
     }
-    cont.innerHTML = registros.map(r=>`
+    cont.innerHTML = notaOffline + registros.map((r,i)=>`
       <div class="fila-detalle-registro">
         <div>
-          <div>${r.totalUnidadBase!=null ? fmtCantidad(r.totalUnidadBase)+" "+r.unidadBase : fmtTon(r.totalToneladas)+" Ton"}${r.ubicacion ? ` · Ubic. ${r.ubicacion}` : ""}${r._pendiente ? ` <span style="color:var(--capa-naranja);font-weight:700;">· ${r._estadoCola==="conflicto"?"conflicto":"pendiente de subir"}</span>` : ""}</div>
+          <div>${r.totalUnidadBase!=null ? fmtCantidad(r.totalUnidadBase)+" "+r.unidadBase : fmtTon(r.totalToneladas)+" Ton"}${r.ubicacion ? ` · Ubic. ${r.ubicacion}` : ""}${r._pendiente ? ` <span style="color:var(--capa-naranja);font-weight:700;">· ${r._estadoCola==="conflicto"?"conflicto":"pendiente de subir"}</span>` : ""}${r._archivado ? ` <span style="color:var(--capa-purpura);font-weight:700;">· archivado</span>` : ""}</div>
           <div class="meta">${fmtFecha(r.fecha)} · ${r.usuario||""}${r.fechaCaducidad ? " · Caduca " + r.fechaCaducidad : ""}${r.editadoEn ? " · editado" : ""}</div>
         </div>
         <div style="display:flex;gap:4px;flex-shrink:0;">
-          <button class="btn-texto" style="padding:4px 6px;font-size:.72rem;" data-editar-id="${r._fileId}">${ICONOS.lapiz}Editar</button>
-          <button class="btn-borrar" data-id="${r._fileId}">${ICONOS.papelera}Anular</button>
+          <button class="btn-texto" style="padding:4px 6px;font-size:.72rem;" data-editar-idx="${i}">${ICONOS.lapiz}Editar</button>
+          <button class="btn-borrar" data-idx="${i}">${ICONOS.papelera}Anular</button>
         </div>
       </div>`).join("");
+
+    // Si el registro pertenece a un archivo archivado, avisamos y ofrecemos reabrir antes
+    // de dejar tocar nada; si acepta, se reabre y hay que volver a pulsar (evita "continuar
+    // a ciegas" una edición sobre datos que acaban de cambiar de sitio).
+    async function comprobarArchivadoYContinuar(r){
+      if (!r._archivado) return true;
+      const reabrir = confirm(
+        `Este registro forma parte de un inventario archivado ("${r._fileName}").\n\n` +
+        `¿Deseas reabrir este recuento para poder editarlo o anularlo?`
+      );
+      if (!reabrir) return false;
+      try{
+        await reabrirConsolidado(r._fileId);
+        await renderRecientes(codigo, onEditar);
+        alert("Recuento reabierto. Vuelve a pulsar Editar/Anular sobre el registro para continuar.");
+      }catch(e){
+        console.error(e);
+        alert("No se pudo reabrir: " + e.message);
+      }
+      return false;
+    }
+
     if (onEditar){
-      cont.querySelectorAll("[data-editar-id]").forEach(b=>{
-        b.addEventListener("click", ()=>{
-          const r = registros.find(x=>x._fileId === b.dataset.editarId);
-          if (r) onEditar(r);
+      cont.querySelectorAll("[data-editar-idx]").forEach(b=>{
+        b.addEventListener("click", async ()=>{
+          const r = registros[Number(b.dataset.editarIdx)];
+          if (!r) return;
+          if (!(await comprobarArchivadoYContinuar(r))) return;
+          onEditar(r);
         });
       });
     }
     cont.querySelectorAll(".btn-borrar").forEach(b=>{
       b.addEventListener("click", async ()=>{
+        const r = registros[Number(b.dataset.idx)];
+        if (!r) return;
+        if (!(await comprobarArchivadoYContinuar(r))) return;
         if (!confirm("¿Anular este registro? No se puede deshacer.")) return;
-        await borrarRegistro(b.dataset.id);
+        await borrarRegistro(r._fileId);
         await renderRecientes(codigo, onEditar);
       });
     });
   }catch(e){
-    cont.innerHTML = esErrorDeRed(e)
-      ? `<div class="aviso info">Sin conexión y todavía no hay copia guardada de los registros de este artículo en el dispositivo.</div>`
-      : `<div class="aviso error">No se pudieron cargar los registros recientes.</div>`;
+    cont.innerHTML = `<div class="aviso error">No se pudieron cargar los registros recientes.</div>`;
   }
 }
 
@@ -1660,9 +1755,7 @@ async function renderInventario(){
   try{
     registros = await cargarRegistros();
   }catch(e){
-    cont.innerHTML = esErrorDeRed(e)
-      ? `<div class="aviso error">Sin conexión y todavía no hay ninguna copia guardada de este inventario en el dispositivo. Ábrelo una vez con conexión para poder consultarlo luego sin ella.</div>`
-      : `<div class="aviso error">No se pudo cargar el inventario: ${e.message}</div>`;
+    cont.innerHTML = `<div class="aviso error">No se pudo cargar el inventario: ${e.message}</div>`;
     return;
   }
 
@@ -1698,7 +1791,7 @@ async function renderInventario(){
 
   const sub = $("#contenido-subvista");
   sub.innerHTML = `
-    ${state.registrosSonCache ? `<div class="aviso info">Sin conexión: mostrando la última copia guardada en este dispositivo. Puede no incluir lo más reciente de otros usuarios.</div>` : ""}
+    ${state.registrosIncompletosPorRed ? `<div class="aviso info">Sin conexión: solo se muestran los registros pendientes de subir desde este dispositivo, no el histórico completo del inventario.</div>` : ""}
     <div class="resumen-cabecera">
       <div class="chip-metrica"><div class="num">${filas.length}</div><div class="lbl">Artículos</div></div>
       <div class="chip-metrica"><div class="num">${registros.length}</div><div class="lbl">Registros</div></div>
@@ -1717,6 +1810,16 @@ async function renderInventario(){
     </div>
     <div style="font-size:.75rem;color:var(--texto-claro);margin:-6px 0 12px;">Toca un artículo para ver o editar sus registros.</div>
     <button class="btn-secundario" id="btn-exportar">${ICONOS.descargar}Exportar a Excel</button>
+    ${(() => {
+      const individuales = registros.filter(r => !r._archivado && !r._pendiente).length;
+      const archivados = registros.filter(r => r._archivado).length;
+      if (!individuales) return "";
+      return `
+        <div style="font-size:.72rem;color:var(--texto-claro);margin-top:14px;">
+          ${individuales} registros individuales${archivados ? ` · ${archivados} ya archivados` : ""}
+        </div>
+        <button class="btn-secundario" id="btn-archivar" style="margin-top:8px;">${ICONOS.carpeta}Archivar inventario</button>`;
+    })()}
     ` : `<div class="aviso info">Todavía no hay registros en este inventario.</div>`}
   `;
 
@@ -1740,6 +1843,20 @@ async function renderInventario(){
   }
   pintarTabla("");
   $("#filtro-inventario")?.addEventListener("input", e => pintarTabla(e.target.value.trim().toLowerCase()));
+
+  $("#btn-archivar")?.addEventListener("click", async ()=>{
+    const btn = $("#btn-archivar");
+    btn.disabled = true; btn.textContent = "Archivando…";
+    try{
+      const hecho = await archivarInventario();
+      if (hecho) renderVista();
+      else { btn.disabled = false; btn.innerHTML = ICONOS.carpeta + "Archivar inventario"; }
+    }catch(e){
+      console.error(e);
+      alert("No se pudo archivar: " + e.message);
+      btn.disabled = false; btn.innerHTML = ICONOS.carpeta + "Archivar inventario";
+    }
+  });
 
   $("#btn-exportar")?.addEventListener("click", () => {
     const wb = XLSX.utils.book_new();
