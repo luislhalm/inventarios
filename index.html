@@ -255,9 +255,11 @@ main{flex:1;padding:16px;padding-bottom:32px;}
 }
 /* Modo "solo ubicación 00": ahora 4 columnas (sin Código, se consulta tocando la fila),
    así que apretamos bien para que quepa en un móvil sin scroll lateral. */
-#tabla-diferencias.modo-solo00{font-size:.78rem;}
-#tabla-diferencias.modo-solo00 th,#tabla-diferencias.modo-solo00 td{padding:9px 6px;}
-#tabla-diferencias.modo-solo00 .col-desc{max-width:150px;padding-left:10px;}
+#tarjeta-tabla-diferencias.tarjeta-compacta{padding:6px;}
+#tabla-diferencias.modo-solo00{font-size:.76rem;border-collapse:collapse;}
+#tabla-diferencias.modo-solo00 th,#tabla-diferencias.modo-solo00 td{padding:6px 3px;}
+#tabla-diferencias.modo-solo00 th:not(:last-child),#tabla-diferencias.modo-solo00 td:not(:last-child){border-right:1px solid var(--border);}
+#tabla-diferencias.modo-solo00 .col-desc{max-width:120px;padding-left:6px;}
 #tabla-diferencias.modo-solo00 tbody tr{cursor:pointer;}
 
 .popup-fila{
@@ -2092,7 +2094,7 @@ async function renderDiferencias(registros){
     <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:var(--texto-claro);margin:0 0 12px;">
       <input type="checkbox" id="chk-solo-ubic-00"> Mostrar solo ubicación 00
     </label>
-    <div class="tarjeta" style="overflow-x:auto;">
+    <div class="tarjeta" id="tarjeta-tabla-diferencias" style="overflow-x:auto;">
       <table class="tabla-inventario tabla-diferencias" id="tabla-diferencias">
         <thead id="cabecera-diferencias"></thead>
         <tbody></tbody>
@@ -2107,10 +2109,11 @@ async function renderDiferencias(registros){
 
   function pintarCabecera(solo00){
     $("#tabla-diferencias").classList.toggle("modo-solo00", !!solo00);
+    $("#tarjeta-tabla-diferencias").classList.toggle("tarjeta-compacta", !!solo00);
     $("#cabecera-diferencias").innerHTML = solo00 ? `
       <tr>
         <th class="col-desc">Descripción</th>
-        <th class="num">Rec 00</th><th class="num">Sis 00</th><th class="num">Diferencias</th>
+        <th class="num">Rec 00</th><th class="num">Sis 00</th><th class="num">Dif</th>
       </tr>` : `
       <tr>
         <th rowspan="2">Código</th><th rowspan="2" class="col-desc">Descripción</th>
