@@ -493,6 +493,7 @@ const state = {
   registrosCacheKey: "",
   sincronizando: false,
   registrosIncompletosPorRed: false,
+  registrosConErrores: 0,
 };
 
 let msalInstance;
@@ -742,26 +743,29 @@ async function graphBatch(requests){
   return resultados;
 }
 // Descarga el contenido de varios archivos a la vez (ver graphBatch).
-// El endpoint /content normalmente redirige (302) a una URL de descarga temporal, y esa
-// redirección NO se sigue dentro de $batch (por eso ahí no llegaba el contenido real).
-// En su lugar, pedimos la URL de descarga directa de cada archivo (@microsoft.graph.downloadUrl)
-// y las descargamos en paralelo con fetch normal, que sí sigue redirecciones.
-async function descargarContenidosParalelo(items, concurrencia=10){
+// Descarga el contenido de varios archivos en paralelo (varios a la vez, no de uno en uno),
+// usando el mismo endpoint /content de siempre con graphFetch (que sigue bien la redirección
+// a la URL de descarga temporal, a diferencia de $batch o de fetch directo a downloadUrl,
+// que en pruebas reales no estaban trayendo los datos). Si un archivo falla, se cuenta como
+// error en vez de desaparecer en silencio.
+async function descargarContenidosParalelo(items, concurrencia=8){
   const resultados = new Map();
+  let errores = 0;
   let indice = 0;
   async function trabajador(){
     while (indice < items.length){
       const item = items[indice++];
-      const url = item["@microsoft.graph.downloadUrl"];
-      if (!url) continue;
       try{
-        const res = await fetch(url);
-        if (res.ok) resultados.set(item.id, await res.json());
-      }catch(e){ /* si un archivo falla, se ignora y se sigue con el resto */ }
+        const res = await graphFetch(`/drives/${state.driveId}/items/${item.id}/content`);
+        resultados.set(item.id, await res.json());
+      }catch(e){
+        errores++;
+        console.error("No se pudo leer", item.name, e);
+      }
     }
   }
   await Promise.all(Array.from({ length: Math.min(concurrencia, items.length) }, trabajador));
-  return resultados;
+  return { resultados, errores };
 }
 
 async function resolveSiteAndDrive(){
@@ -1232,11 +1236,11 @@ async function cargarRegistros(){
 
   const carpeta = `${clave}/registros`;
   state.registrosIncompletosPorRed = false;
+  state.registrosConErrores = 0;
   try{
-    // Paginamos hasta traer TODOS los archivos, no solo los primeros (antes se cortaba en 999),
-    // pidiendo también la URL de descarga directa de cada uno.
+    // Paginamos hasta traer TODOS los archivos, no solo los primeros (antes se cortaba en 999).
     let items = [];
-    let url = `/drives/${state.driveId}/root:/${encPath(carpeta)}:/children?$top=200&$select=id,name,file,lastModifiedDateTime,@microsoft.graph.downloadUrl`;
+    let url = `/drives/${state.driveId}/root:/${encPath(carpeta)}:/children?$top=200`;
     while (url){
       const res = await graphFetch(url);
       const data = await res.json();
@@ -1244,9 +1248,9 @@ async function cargarRegistros(){
       url = data["@odata.nextLink"] || null;
     }
 
-    // Contenidos en paralelo (descarga directa), en vez de uno a uno y en vez de $batch
-    // (que no sigue la redirección del endpoint de contenido).
-    const contenidos = await descargarContenidosParalelo(items);
+    // Contenidos en paralelo (varios a la vez), no de uno en uno.
+    const { resultados: contenidos, errores } = await descargarContenidosParalelo(items);
+    state.registrosConErrores = errores;
     const registros = [];
     for (const item of items){
       const datos = contenidos.get(item.id);
@@ -1805,6 +1809,7 @@ async function renderInventario(){
   const sub = $("#contenido-subvista");
   sub.innerHTML = `
     ${state.registrosIncompletosPorRed ? `<div class="aviso info">Sin conexión: solo se muestran los registros pendientes de subir desde este dispositivo, no el histórico completo del inventario.</div>` : ""}
+    ${state.registrosConErrores > 0 ? `<div class="aviso error">${state.registrosConErrores} archivo${state.registrosConErrores===1?"":"s"} no se ${state.registrosConErrores===1?"pudo":"pudieron"} leer y no aparece${state.registrosConErrores===1?"":"n"} en este resumen. Revisa la consola del navegador (F12) para ver el detalle, o inténtalo de nuevo.</div>` : ""}
     <div class="resumen-cabecera">
       <div class="chip-metrica"><div class="num">${filas.length}</div><div class="lbl">Artículos</div></div>
       <div class="chip-metrica"><div class="num">${registros.length}</div><div class="lbl">Registros</div></div>
