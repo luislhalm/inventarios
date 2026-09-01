@@ -1179,6 +1179,23 @@ function datosLimpios(r){
 
 // Agrupa en un único archivo todos los registros individuales (no archivados, no pendientes)
 // del inventario actual, y borra exactamente los archivos que se han metido dentro.
+// Junta una lista de registros individuales en un único archivo consolidado, y borra
+// exactamente esos archivos (nunca "todo lo que haya en la carpeta" en ese momento) — así un
+// registro nuevo que llegue justo en este instante no se pierde, se queda suelto sin más.
+async function consolidarRegistros(lista){
+  if (!lista.length) return;
+  const carpeta = `${carpetaInventario()}/registros`;
+  const sufijo = Math.random().toString(36).slice(2,7);
+  const nombreArchivo = `_archivado_${Date.now()}_${sufijo}.json`;
+  await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/${nombreArchivo}:/content`, {
+    method:"PUT",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(lista.map(datosLimpios)),
+  });
+  const idsUnicos = [...new Set(lista.map(r=>r._fileId))];
+  await graphBatch(idsUnicos.map(id => ({ id, method:"DELETE", url:`/drives/${state.driveId}/items/${id}` })));
+}
+
 async function archivarInventario(){
   const todos = await cargarRegistros();
   const individuales = todos.filter(r => !r._archivado && !r._pendiente);
@@ -1189,24 +1206,36 @@ async function archivarInventario(){
   if (!confirm(`Se van a cerrar ${individuales.length} registros, agrupándolos en un único archivo para aligerar el inventario.\n\nPodrás deshacerlo más adelante (se reabre automáticamente en cuanto intentes editar o anular algo de dentro).\n\n¿Continuar?`)){
     return false;
   }
-
-  const carpeta = `${carpetaInventario()}/registros`;
-  const sufijo = Math.random().toString(36).slice(2,7);
-  const nombreArchivo = `_archivado_${Date.now()}_${sufijo}.json`;
-  await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/${nombreArchivo}:/content`, {
-    method:"PUT",
-    headers:{"Content-Type":"application/json"},
-    body: JSON.stringify(individuales.map(datosLimpios)),
-  });
-
-  // Borramos exactamente los archivos que acabamos de meter en el consolidado (por su ID),
-  // nunca "todo lo que haya en la carpeta" — así un registro nuevo que llegue justo en este
-  // instante no se pierde, simplemente queda suelto para el próximo archivado.
-  const idsUnicos = [...new Set(individuales.map(r=>r._fileId))];
-  await graphBatch(idsUnicos.map(id => ({ id, method:"DELETE", url:`/drives/${state.driveId}/items/${id}` })));
-
+  await consolidarRegistros(individuales);
   state.registrosCacheKey = "";
   return true;
+}
+
+// Consolidación automática y silenciosa: si se acumulan muchos registros sueltos, junta los
+// más antiguos en segundo plano (sin preguntar), dejando siempre sueltos los últimos minutos
+// — que son los únicos con riesgo real de que dos personas choquen a la vez. Así la carga se
+// mantiene rápida aunque el inventario lleve semanas creciendo, sin que nadie tenga que
+// acordarse de pulsar "Cerrar inventario".
+const AUTOCONSOLIDAR_UMBRAL = 60;      // a partir de cuántos sueltos merece la pena actuar
+const AUTOCONSOLIDAR_MINIMO = 20;      // no consolidar por 2-3 registros, no compensa
+const AUTOCONSOLIDAR_MINUTOS_RECIENCIA = 10; // deja intactos los últimos N minutos
+async function autoConsolidarSiHaceFalta(registros){
+  const individuales = registros.filter(r => !r._archivado && !r._pendiente);
+  if (individuales.length <= AUTOCONSOLIDAR_UMBRAL) return;
+
+  const ahora = Date.now();
+  const antiguos = individuales.filter(r => {
+    const t = new Date(r._modificado || r.fecha).getTime();
+    return isFinite(t) && (ahora - t) > AUTOCONSOLIDAR_MINUTOS_RECIENCIA * 60000;
+  });
+  if (antiguos.length < AUTOCONSOLIDAR_MINIMO) return;
+
+  try{
+    await consolidarRegistros(antiguos);
+    state.registrosCacheKey = ""; // la próxima vez que se abra este inventario, ya cargará menos archivos
+  }catch(e){
+    console.error("La consolidación automática en segundo plano ha fallado (no es grave, se reintentará):", e);
+  }
 }
 
 // Deshace un archivo consolidado: recrea cada registro como archivo individual y borra el consolidado.
@@ -1823,6 +1852,10 @@ async function renderInventario(){
   `;
   $("#btn-sub-resumen").addEventListener("click", ()=>{ state.vistaInventarioSub = "resumen"; renderVista(); });
   $("#btn-sub-diferencias").addEventListener("click", ()=>{ state.vistaInventarioSub = "diferencias"; renderVista(); });
+
+  // En segundo plano, sin bloquear ni avisar: si hay muchos registros sueltos ya "viejos",
+  // los va agrupando solos para que la próxima carga de este inventario sea más rápida.
+  autoConsolidarSiHaceFalta(registros);
 
   if (state.vistaInventarioSub === "diferencias"){
     await renderDiferencias(registros);
