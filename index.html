@@ -260,16 +260,13 @@ main{flex:1;padding:16px;padding-bottom:32px;}
 #tabla-diferencias.modo-solo00 .col-desc{max-width:150px;padding-left:10px;}
 #tabla-diferencias.modo-solo00 tbody tr{cursor:pointer;}
 
-.popup-overlay{
-  position:fixed;inset:0;background:rgba(62,57,56,.5);z-index:100;
-  display:flex;align-items:center;justify-content:center;padding:24px;
+.popup-fila{
+  position:fixed;z-index:100;background:var(--surface);border-radius:10px;
+  padding:9px 14px;max-width:240px;text-align:center;
+  border:1px solid var(--border);box-shadow:0 4px 16px rgba(62,57,56,.18);
 }
-.popup-tarjeta{
-  background:var(--surface);border-radius:14px;padding:22px;max-width:320px;width:100%;
-  text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.25);
-}
-.popup-codigo{font-size:.78rem;color:var(--capa-purpura);font-weight:700;letter-spacing:.02em;}
-.popup-desc{font-size:1.05rem;font-weight:700;margin-top:6px;color:var(--capa-negro);}
+.popup-codigo{font-size:.68rem;color:var(--capa-purpura);font-weight:700;letter-spacing:.02em;}
+.popup-desc{font-size:.85rem;font-weight:700;margin-top:2px;color:var(--capa-negro);}
 .chip-metrica{
   flex:1;background:var(--surface);border:1px solid var(--border);border-radius:12px;
   padding:12px;text-align:center;
@@ -631,21 +628,33 @@ function avisoLogin(texto, tipo){
 }
 // Pequeña ventanita con el código y la descripción completa de un artículo — se usa en la
 // tabla compacta de diferencias (modo "solo ubicación 00"), donde se quita la columna de
-// Código para que quepa en el móvil, y se consulta tocando la fila.
-function mostrarPopupCodigo(codigo, descripcion){
-  document.getElementById("popup-codigo-articulo")?.remove();
+// Código para que quepa en el móvil. Aparece pegada justo encima de la fila tocada (o debajo
+// si no cabe arriba), sin fondo oscuro ni botón — se cierra tocando en cualquier otro sitio.
+function mostrarPopupCodigo(codigo, descripcion, elementoFila){
+  if (window.__cerrarPopupCodigo) window.__cerrarPopupCodigo();
+
   const div = document.createElement("div");
-  div.id = "popup-codigo-articulo";
-  div.className = "popup-overlay";
-  div.innerHTML = `
-    <div class="popup-tarjeta">
-      <div class="popup-codigo">${codigo}</div>
-      <div class="popup-desc">${descripcion}</div>
-      <button class="btn-secundario" id="btn-cerrar-popup-codigo" style="margin-top:14px;">Cerrar</button>
-    </div>`;
+  div.className = "popup-fila";
+  div.innerHTML = `<div class="popup-codigo">${codigo}</div><div class="popup-desc">${descripcion}</div>`;
   document.body.appendChild(div);
-  div.addEventListener("click", (e)=>{ if (e.target === div) div.remove(); });
-  document.getElementById("btn-cerrar-popup-codigo").addEventListener("click", ()=> div.remove());
+
+  const rectFila = elementoFila.getBoundingClientRect();
+  const rectPopup = div.getBoundingClientRect();
+  let top = rectFila.top - rectPopup.height - 8; // por defecto, pegado justo encima de la fila
+  if (top < 8) top = rectFila.bottom + 8;        // si no cabe arriba, lo ponemos debajo
+  let left = rectFila.left + rectFila.width/2 - rectPopup.width/2;
+  left = Math.max(8, Math.min(left, window.innerWidth - rectPopup.width - 8));
+  div.style.top = `${top}px`;
+  div.style.left = `${left}px`;
+
+  function cerrar(e){
+    if (e && div.contains(e.target)) return;
+    div.remove();
+    document.removeEventListener("click", cerrar, true);
+    window.__cerrarPopupCodigo = null;
+  }
+  window.__cerrarPopupCodigo = cerrar;
+  setTimeout(()=> document.addEventListener("click", cerrar, true), 0); // evita que el propio toque lo cierre
 }
 
 function abrirSelectorAlmacen(){
@@ -2137,7 +2146,7 @@ async function renderDiferencias(registros){
       tbody.querySelectorAll("tr").forEach(tr=>{
         tr.addEventListener("click", ()=>{
           const x = f[Number(tr.dataset.idxSolo00)];
-          if (x) mostrarPopupCodigo(x.codigo, x.descripcion);
+          if (x) mostrarPopupCodigo(x.codigo, x.descripcion, tr);
         });
       });
     } else {
