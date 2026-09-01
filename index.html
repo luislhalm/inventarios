@@ -253,11 +253,23 @@ main{flex:1;padding:16px;padding-bottom:32px;}
 #tabla-diferencias .col-desc{
   max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
-/* Modo "solo ubicación 00": solo 5 columnas, así que apretamos bien para que quepa en un móvil sin scroll lateral. */
-#tabla-diferencias.modo-solo00{font-size:.74rem;}
-#tabla-diferencias.modo-solo00 th,#tabla-diferencias.modo-solo00 td{padding:8px 4px;}
-#tabla-diferencias.modo-solo00 .col-desc{max-width:84px;}
-#tabla-diferencias.modo-solo00 th:first-child,#tabla-diferencias.modo-solo00 td:first-child{padding-left:8px;}
+/* Modo "solo ubicación 00": ahora 4 columnas (sin Código, se consulta tocando la fila),
+   así que apretamos bien para que quepa en un móvil sin scroll lateral. */
+#tabla-diferencias.modo-solo00{font-size:.78rem;}
+#tabla-diferencias.modo-solo00 th,#tabla-diferencias.modo-solo00 td{padding:9px 6px;}
+#tabla-diferencias.modo-solo00 .col-desc{max-width:150px;padding-left:10px;}
+#tabla-diferencias.modo-solo00 tbody tr{cursor:pointer;}
+
+.popup-overlay{
+  position:fixed;inset:0;background:rgba(62,57,56,.5);z-index:100;
+  display:flex;align-items:center;justify-content:center;padding:24px;
+}
+.popup-tarjeta{
+  background:var(--surface);border-radius:14px;padding:22px;max-width:320px;width:100%;
+  text-align:center;box-shadow:0 8px 30px rgba(0,0,0,.25);
+}
+.popup-codigo{font-size:.78rem;color:var(--capa-purpura);font-weight:700;letter-spacing:.02em;}
+.popup-desc{font-size:1.05rem;font-weight:700;margin-top:6px;color:var(--capa-negro);}
 .chip-metrica{
   flex:1;background:var(--surface);border:1px solid var(--border);border-radius:12px;
   padding:12px;text-align:center;
@@ -617,6 +629,25 @@ function setEstado(texto, tipo){
 function avisoLogin(texto, tipo){
   $("#login-aviso").innerHTML = texto ? `<div class="aviso ${tipo||'error'}" style="margin-top:10px;max-width:320px;">${texto}</div>` : "";
 }
+// Pequeña ventanita con el código y la descripción completa de un artículo — se usa en la
+// tabla compacta de diferencias (modo "solo ubicación 00"), donde se quita la columna de
+// Código para que quepa en el móvil, y se consulta tocando la fila.
+function mostrarPopupCodigo(codigo, descripcion){
+  document.getElementById("popup-codigo-articulo")?.remove();
+  const div = document.createElement("div");
+  div.id = "popup-codigo-articulo";
+  div.className = "popup-overlay";
+  div.innerHTML = `
+    <div class="popup-tarjeta">
+      <div class="popup-codigo">${codigo}</div>
+      <div class="popup-desc">${descripcion}</div>
+      <button class="btn-secundario" id="btn-cerrar-popup-codigo" style="margin-top:14px;">Cerrar</button>
+    </div>`;
+  document.body.appendChild(div);
+  div.addEventListener("click", (e)=>{ if (e.target === div) div.remove(); });
+  document.getElementById("btn-cerrar-popup-codigo").addEventListener("click", ()=> div.remove());
+}
+
 function abrirSelectorAlmacen(){
   $("#sel-almacen").scrollIntoView({behavior:"smooth", block:"center"});
   $("#sel-almacen").focus();
@@ -2069,7 +2100,7 @@ async function renderDiferencias(registros){
     $("#tabla-diferencias").classList.toggle("modo-solo00", !!solo00);
     $("#cabecera-diferencias").innerHTML = solo00 ? `
       <tr>
-        <th>Código</th><th class="col-desc">Descripción</th>
+        <th class="col-desc">Descripción</th>
         <th class="num">Rec 00</th><th class="num">Sis 00</th><th class="num">Diferencias</th>
       </tr>` : `
       <tr>
@@ -2095,19 +2126,29 @@ async function renderDiferencias(registros){
         ? f.filter(x => Math.abs(x.dif00) > 0.0005)
         : f.filter(x => Math.abs(x.difTotal) > 0.0005 || Math.abs(x.dif00)>0.0005 || Math.abs(x.dif10)>0.0005 || Math.abs(x.dif20)>0.0005);
     }
-    tbody.innerHTML = solo00
-      ? f.map(x=>`
-        <tr>
-          <td>${x.codigo}</td><td class="col-desc" title="${x.descripcion}">${x.descripcion}</td>
+    if (solo00){
+      // Sin columna de Código a la vista (para que quepa en el móvil), pero se sigue
+      // ordenando por código y se puede consultar tocando la fila.
+      tbody.innerHTML = f.map((x,i)=>`
+        <tr data-idx-solo00="${i}">
+          <td class="col-desc">${x.descripcion}</td>
           <td class="num">${fmtCantidad(x.rec00)}</td><td class="num">${fmtCantidad(x.sis00)}</td>${celdaDif(x.dif00)}
-        </tr>`).join("")
-      : f.map(x=>`
+        </tr>`).join("");
+      tbody.querySelectorAll("tr").forEach(tr=>{
+        tr.addEventListener("click", ()=>{
+          const x = f[Number(tr.dataset.idxSolo00)];
+          if (x) mostrarPopupCodigo(x.codigo, x.descripcion);
+        });
+      });
+    } else {
+      tbody.innerHTML = f.map(x=>`
         <tr>
           <td>${x.codigo}</td><td class="col-desc" title="${x.descripcion}">${x.descripcion}</td>
           <td class="num">${fmtCantidad(x.rec00)}</td><td class="num">${fmtCantidad(x.rec10)}</td><td class="num">${fmtCantidad(x.rec20)}</td><td class="num">${fmtCantidad(x.recTotal)}</td>
           <td class="num">${fmtCantidad(x.sis00)}</td><td class="num">${fmtCantidad(x.sis10)}</td><td class="num">${fmtCantidad(x.sis20)}</td><td class="num">${fmtCantidad(x.sisTotal)}</td>
           ${celdaDif(x.dif00)}${celdaDif(x.dif10)}${celdaDif(x.dif20)}${celdaDif(x.difTotal)}
         </tr>`).join("");
+    }
   }
   function refrescar(){
     pintar(
