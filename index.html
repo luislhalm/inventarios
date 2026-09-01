@@ -309,6 +309,24 @@ nav.tabs button{
 nav.tabs button.activa{color:var(--capa-naranja);}
 nav.tabs svg{width:22px;height:22px;}
 
+/* ---------- pantallas de poca altura (móvil en horizontal) ----------
+   Se compacta la cabecera y la barra inferior para dejar sitio a las filas de la tabla. */
+@media (max-height:500px){
+  .gradiente-firma{height:4px;}
+  header.cabecera{padding:6px 14px 6px;}
+  .fila-cabecera img.logo-mini{height:16px;}
+  .usuario-chip{font-size:.7rem;gap:6px;}
+  .usuario-chip button{padding:2px 8px;}
+  .selectores{margin-top:6px;gap:6px;}
+  .selector-campo label{display:none;} /* el texto del propio selector ya se entiende sin la etiqueta */
+  .selector-campo select{padding:6px 8px;font-size:.8rem;}
+  #info-inventario-actual,.estado-conexion{margin-top:4px;font-size:.66rem;}
+  #app{padding-bottom:calc(46px + var(--safe-bottom));}
+  main{padding:8px 16px 12px;}
+  nav.tabs button{padding:5px 4px 4px;gap:1px;font-size:.62rem;}
+  nav.tabs svg{width:16px;height:16px;}
+}
+
 .spinner{
   width:22px;height:22px;border-radius:50%;
   border:3px solid var(--border);border-top-color:var(--capa-naranja);
