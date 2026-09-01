@@ -1886,7 +1886,7 @@ async function renderInventario(){
     ${filas.length ? `
     <div class="tarjeta" style="overflow-x:auto;">
       <table class="tabla-inventario" id="tabla-inventario">
-        <thead><tr><th>Código</th><th>Descripción</th><th class="num">Reg.</th><th class="num">Cantidad total</th></tr></thead>
+        <thead><tr><th>Código</th><th>Descripción</th><th class="num">Cantidad total</th></tr></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -1905,7 +1905,7 @@ async function renderInventario(){
     if (!tbody) return;
     const f = filtro ? filas.filter(x => x.codigo.toLowerCase().includes(filtro) || x.descripcion.toLowerCase().includes(filtro)) : filas;
     tbody.innerHTML = f.map(x=>`
-      <tr data-codigo="${x.codigo}"><td>${x.codigo}</td><td>${x.descripcion}</td><td class="num">${x.n}</td><td class="num">${fmtCantidad(x.cantidad)} ${x.unidad}</td></tr>
+      <tr data-codigo="${x.codigo}"><td>${x.codigo}</td><td>${x.descripcion}</td><td class="num">${fmtCantidad(x.cantidad)} ${x.unidad}</td></tr>
     `).join("");
     tbody.querySelectorAll("tr").forEach(tr=>{
       tr.addEventListener("click", ()=>{
@@ -2040,24 +2040,15 @@ async function renderDiferencias(registros){
     <div class="campo-busqueda">
       <input id="filtro-diferencias" placeholder="Filtrar por código o descripción…">
     </div>
-    <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:var(--texto-claro);margin:-4px 0 12px;">
+    <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:var(--texto-claro);margin:-4px 0 6px;">
       <input type="checkbox" id="chk-solo-diferencias"> Mostrar solo artículos con diferencia
+    </label>
+    <label style="display:flex;align-items:center;gap:6px;font-size:.82rem;color:var(--texto-claro);margin:0 0 12px;">
+      <input type="checkbox" id="chk-solo-ubic-00"> Mostrar solo ubicación 00
     </label>
     <div class="tarjeta" style="overflow-x:auto;">
       <table class="tabla-inventario tabla-diferencias" id="tabla-diferencias">
-        <thead>
-          <tr>
-            <th rowspan="2">Código</th><th rowspan="2" class="col-desc">Descripción</th>
-            <th colspan="4" class="grupo">Inventario recuento</th>
-            <th colspan="4" class="grupo">Inventario sistema</th>
-            <th colspan="4" class="grupo">Diferencias</th>
-          </tr>
-          <tr>
-            <th class="num">00</th><th class="num">10</th><th class="num">20</th><th class="num">Total</th>
-            <th class="num">00</th><th class="num">10</th><th class="num">20</th><th class="num">Total</th>
-            <th class="num">00</th><th class="num">10</th><th class="num">20</th><th class="num">Total</th>
-          </tr>
-        </thead>
+        <thead id="cabecera-diferencias"></thead>
         <tbody></tbody>
       </table>
     </div>
@@ -2068,22 +2059,60 @@ async function renderDiferencias(registros){
     return `<td class="num ${cls}">${fmtCantidad(v)}</td>`;
   }
 
-  function pintar(filtro, soloDif){
+  function pintarCabecera(solo00){
+    $("#cabecera-diferencias").innerHTML = solo00 ? `
+      <tr>
+        <th>Código</th><th class="col-desc">Descripción</th>
+        <th class="num">Recuento 00</th><th class="num">Sistema 00</th><th class="num">Diferencia 00</th>
+      </tr>` : `
+      <tr>
+        <th rowspan="2">Código</th><th rowspan="2" class="col-desc">Descripción</th>
+        <th colspan="4" class="grupo">Inventario recuento</th>
+        <th colspan="4" class="grupo">Inventario sistema</th>
+        <th colspan="4" class="grupo">Diferencias</th>
+      </tr>
+      <tr>
+        <th class="num">00</th><th class="num">10</th><th class="num">20</th><th class="num">Total</th>
+        <th class="num">00</th><th class="num">10</th><th class="num">20</th><th class="num">Total</th>
+        <th class="num">00</th><th class="num">10</th><th class="num">20</th><th class="num">Total</th>
+      </tr>`;
+  }
+
+  function pintar(filtro, soloDif, solo00){
+    pintarCabecera(solo00);
     const tbody = $("#tabla-diferencias tbody");
     let f = filas;
     if (filtro) f = f.filter(x => x.codigo.toLowerCase().includes(filtro) || x.descripcion.toLowerCase().includes(filtro));
-    if (soloDif) f = f.filter(x => Math.abs(x.difTotal) > 0.0005 || Math.abs(x.dif00)>0.0005 || Math.abs(x.dif10)>0.0005 || Math.abs(x.dif20)>0.0005);
-    tbody.innerHTML = f.map(x=>`
-      <tr>
-        <td>${x.codigo}</td><td class="col-desc" title="${x.descripcion}">${x.descripcion}</td>
-        <td class="num">${fmtCantidad(x.rec00)}</td><td class="num">${fmtCantidad(x.rec10)}</td><td class="num">${fmtCantidad(x.rec20)}</td><td class="num">${fmtCantidad(x.recTotal)}</td>
-        <td class="num">${fmtCantidad(x.sis00)}</td><td class="num">${fmtCantidad(x.sis10)}</td><td class="num">${fmtCantidad(x.sis20)}</td><td class="num">${fmtCantidad(x.sisTotal)}</td>
-        ${celdaDif(x.dif00)}${celdaDif(x.dif10)}${celdaDif(x.dif20)}${celdaDif(x.difTotal)}
-      </tr>`).join("");
+    if (soloDif){
+      f = solo00
+        ? f.filter(x => Math.abs(x.dif00) > 0.0005)
+        : f.filter(x => Math.abs(x.difTotal) > 0.0005 || Math.abs(x.dif00)>0.0005 || Math.abs(x.dif10)>0.0005 || Math.abs(x.dif20)>0.0005);
+    }
+    tbody.innerHTML = solo00
+      ? f.map(x=>`
+        <tr>
+          <td>${x.codigo}</td><td class="col-desc" title="${x.descripcion}">${x.descripcion}</td>
+          <td class="num">${fmtCantidad(x.rec00)}</td><td class="num">${fmtCantidad(x.sis00)}</td>${celdaDif(x.dif00)}
+        </tr>`).join("")
+      : f.map(x=>`
+        <tr>
+          <td>${x.codigo}</td><td class="col-desc" title="${x.descripcion}">${x.descripcion}</td>
+          <td class="num">${fmtCantidad(x.rec00)}</td><td class="num">${fmtCantidad(x.rec10)}</td><td class="num">${fmtCantidad(x.rec20)}</td><td class="num">${fmtCantidad(x.recTotal)}</td>
+          <td class="num">${fmtCantidad(x.sis00)}</td><td class="num">${fmtCantidad(x.sis10)}</td><td class="num">${fmtCantidad(x.sis20)}</td><td class="num">${fmtCantidad(x.sisTotal)}</td>
+          ${celdaDif(x.dif00)}${celdaDif(x.dif10)}${celdaDif(x.dif20)}${celdaDif(x.difTotal)}
+        </tr>`).join("");
   }
-  pintar("", false);
-  $("#filtro-diferencias").addEventListener("input", e => pintar(e.target.value.trim().toLowerCase(), $("#chk-solo-diferencias").checked));
-  $("#chk-solo-diferencias").addEventListener("change", e => pintar($("#filtro-diferencias").value.trim().toLowerCase(), e.target.checked));
+  function refrescar(){
+    pintar(
+      $("#filtro-diferencias").value.trim().toLowerCase(),
+      $("#chk-solo-diferencias").checked,
+      $("#chk-solo-ubic-00").checked,
+    );
+  }
+  refrescar();
+  $("#filtro-diferencias").addEventListener("input", refrescar);
+  $("#chk-solo-diferencias").addEventListener("change", refrescar);
+  $("#chk-solo-ubic-00").addEventListener("change", refrescar);
 
   $("#btn-exportar-diferencias").addEventListener("click", ()=>{
     const wb = XLSX.utils.book_new();
