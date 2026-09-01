@@ -272,6 +272,7 @@ table.tabla-inventario th{
 }
 table.tabla-inventario td{padding:10px 8px;border-bottom:1px solid var(--border);}
 table.tabla-inventario td.num{text-align:right;font-weight:700;font-variant-numeric:tabular-nums;}
+table.tabla-inventario th.num{text-align:right;}
 table.tabla-inventario tr:active{background:#FAF6F0;}
 table.tabla-inventario tbody tr{cursor:pointer;}
 
@@ -2069,7 +2070,7 @@ async function renderDiferencias(registros){
     $("#cabecera-diferencias").innerHTML = solo00 ? `
       <tr>
         <th>Código</th><th class="col-desc">Descripción</th>
-        <th class="num">Recuento</th><th class="num">Sistema</th><th class="num">Diferencia</th>
+        <th class="num">Rec 00</th><th class="num">Sis 00</th><th class="num">Diferencias</th>
       </tr>` : `
       <tr>
         <th rowspan="2">Código</th><th rowspan="2" class="col-desc">Descripción</th>
