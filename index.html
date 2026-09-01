@@ -1186,7 +1186,7 @@ async function archivarInventario(){
     alert("No hay registros individuales para archivar en este inventario (puede que ya estén todos archivados).");
     return false;
   }
-  if (!confirm(`Se van a agrupar ${individuales.length} registros en un único archivo para aligerar el inventario.\n\nPodrás deshacerlo más adelante (se reabre automáticamente en cuanto intentes editar o anular algo de dentro).\n\n¿Continuar?`)){
+  if (!confirm(`Se van a cerrar ${individuales.length} registros, agrupándolos en un único archivo para aligerar el inventario.\n\nPodrás deshacerlo más adelante (se reabre automáticamente en cuanto intentes editar o anular algo de dentro).\n\n¿Continuar?`)){
     return false;
   }
 
@@ -1833,6 +1833,14 @@ async function renderInventario(){
   sub.innerHTML = `
     ${state.registrosIncompletosPorRed ? `<div class="aviso info">Sin conexión: solo se muestran los registros pendientes de subir desde este dispositivo, no el histórico completo del inventario.</div>` : ""}
     ${state.registrosConErrores > 0 ? `<div class="aviso error">${state.registrosConErrores} archivo${state.registrosConErrores===1?"":"s"} no se ${state.registrosConErrores===1?"pudo":"pudieron"} leer y no aparece${state.registrosConErrores===1?"":"n"} en este resumen. Revisa la consola del navegador (F12) para ver el detalle, o inténtalo de nuevo.</div>` : ""}
+    ${filas.length ? `
+    <div style="display:flex;gap:8px;margin-bottom:14px;">
+      <button class="btn-secundario" id="btn-exportar" style="margin-top:0;">${ICONOS.descargar}Exportar a Excel</button>
+      ${(() => {
+        const individuales = registros.filter(r => !r._archivado && !r._pendiente).length;
+        return individuales ? `<button class="btn-secundario" id="btn-archivar" style="margin-top:0;">${ICONOS.carpeta}Cerrar inventario</button>` : "";
+      })()}
+    </div>` : ""}
     <div class="resumen-cabecera">
       <div class="chip-metrica"><div class="num">${filas.length}</div><div class="lbl">Artículos</div></div>
       <div class="chip-metrica"><div class="num">${registros.length}</div><div class="lbl">Registros</div></div>
@@ -1849,17 +1857,12 @@ async function renderInventario(){
         <tbody></tbody>
       </table>
     </div>
-    <div style="font-size:.75rem;color:var(--texto-claro);margin:-6px 0 12px;">Toca un artículo para ver o editar sus registros.</div>
-    <button class="btn-secundario" id="btn-exportar">${ICONOS.descargar}Exportar a Excel</button>
+    <div style="font-size:.75rem;color:var(--texto-claro);margin:6px 0 0;">Toca un artículo para ver o editar sus registros.</div>
     ${(() => {
       const individuales = registros.filter(r => !r._archivado && !r._pendiente).length;
       const archivados = registros.filter(r => r._archivado).length;
-      if (!individuales) return "";
-      return `
-        <div style="font-size:.72rem;color:var(--texto-claro);margin-top:14px;">
-          ${individuales} registros individuales${archivados ? ` · ${archivados} ya archivados` : ""}
-        </div>
-        <button class="btn-secundario" id="btn-archivar" style="margin-top:8px;">${ICONOS.carpeta}Archivar inventario</button>`;
+      if (!individuales || !archivados) return "";
+      return `<div style="font-size:.72rem;color:var(--texto-claro);margin-top:6px;">${individuales} registros individuales · ${archivados} ya cerrados</div>`;
     })()}
     ` : `<div class="aviso info">Todavía no hay registros en este inventario.</div>`}
   `;
