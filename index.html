@@ -253,6 +253,11 @@ main{flex:1;padding:16px;padding-bottom:32px;}
 #tabla-diferencias .col-desc{
   max-width:130px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;
 }
+/* Modo "solo ubicación 00": solo 5 columnas, así que apretamos bien para que quepa en un móvil sin scroll lateral. */
+#tabla-diferencias.modo-solo00{font-size:.74rem;}
+#tabla-diferencias.modo-solo00 th,#tabla-diferencias.modo-solo00 td{padding:8px 4px;}
+#tabla-diferencias.modo-solo00 .col-desc{max-width:84px;}
+#tabla-diferencias.modo-solo00 th:first-child,#tabla-diferencias.modo-solo00 td:first-child{padding-left:8px;}
 .chip-metrica{
   flex:1;background:var(--surface);border:1px solid var(--border);border-radius:12px;
   padding:12px;text-align:center;
@@ -2060,10 +2065,11 @@ async function renderDiferencias(registros){
   }
 
   function pintarCabecera(solo00){
+    $("#tabla-diferencias").classList.toggle("modo-solo00", !!solo00);
     $("#cabecera-diferencias").innerHTML = solo00 ? `
       <tr>
         <th>Código</th><th class="col-desc">Descripción</th>
-        <th class="num">Recuento 00</th><th class="num">Sistema 00</th><th class="num">Diferencia 00</th>
+        <th class="num">Recuento</th><th class="num">Sistema</th><th class="num">Diferencia</th>
       </tr>` : `
       <tr>
         <th rowspan="2">Código</th><th rowspan="2" class="col-desc">Descripción</th>
