@@ -683,11 +683,17 @@ async function logout(){
   await msalInstance.logoutRedirect().catch(()=>{ window.location.reload(); });
 }
 
+// Cacheamos el token nosotros mismos: aunque MSAL lo tiene "en caché" internamente,
+// pedírselo decenas de veces seguidas (una por cada archivo) tiene un coste que se nota
+// con cientos de peticiones. Lo reutilizamos mientras no esté a punto de caducar.
+let tokenCache = { valor: null, expira: 0 };
 async function getToken(){
+  if (tokenCache.valor && Date.now() < tokenCache.expira - 60000) return tokenCache.valor;
   const account = msalInstance.getActiveAccount();
   if (!account) throw new Error("Sesión no iniciada");
   try{
     const res = await msalInstance.acquireTokenSilent({ scopes: GRAPH_SCOPES, account });
+    tokenCache = { valor: res.accessToken, expira: res.expiresOn ? res.expiresOn.getTime() : Date.now() + 55*60000 };
     return res.accessToken;
   }catch(e){
     await msalInstance.acquireTokenRedirect({ scopes: GRAPH_SCOPES });
@@ -748,23 +754,40 @@ async function graphBatch(requests){
 // a la URL de descarga temporal, a diferencia de $batch o de fetch directo a downloadUrl,
 // que en pruebas reales no estaban trayendo los datos). Si un archivo falla, se cuenta como
 // error en vez de desaparecer en silencio.
-async function descargarContenidosParalelo(items, concurrencia=8){
-  const resultados = new Map();
-  let errores = 0;
+// Ejecuta una tarea sobre varios elementos con un máximo de "concurrencia" a la vez, en vez
+// de secuencialmente uno detrás de otro. Se usa tanto para leer registros como para leer la
+// fecha de cada inventario.
+async function enParalelo(items, tarea, concurrencia=8){
+  const resultados = new Array(items.length);
   let indice = 0;
   async function trabajador(){
     while (indice < items.length){
-      const item = items[indice++];
-      try{
-        const res = await graphFetch(`/drives/${state.driveId}/items/${item.id}/content`);
-        resultados.set(item.id, await res.json());
-      }catch(e){
-        errores++;
-        console.error("No se pudo leer", item.name, e);
-      }
+      const i = indice++;
+      try{ resultados[i] = await tarea(items[i], i); }
+      catch(e){ resultados[i] = undefined; }
     }
   }
-  await Promise.all(Array.from({ length: Math.min(concurrencia, items.length) }, trabajador));
+  await Promise.all(Array.from({ length: Math.min(concurrencia, items.length || 1) }, trabajador));
+  return resultados;
+}
+
+// Descarga el contenido de varios archivos en paralelo (varios a la vez, no de uno en uno),
+// usando el mismo endpoint /content de siempre con graphFetch (que sigue bien la redirección
+// a la URL de descarga temporal, a diferencia de $batch o de fetch directo a downloadUrl,
+// que en pruebas reales no estaban trayendo los datos). Si un archivo falla, se cuenta como
+// error en vez de desaparecer en silencio.
+async function descargarContenidosParalelo(items, concurrencia=8){
+  const resultados = new Map();
+  let errores = 0;
+  await enParalelo(items, async (item)=>{
+    try{
+      const res = await graphFetch(`/drives/${state.driveId}/items/${item.id}/content`);
+      resultados.set(item.id, await res.json());
+    }catch(e){
+      errores++;
+      console.error("No se pudo leer", item.name, e);
+    }
+  }, concurrencia);
   return { resultados, errores };
 }
 
@@ -1347,11 +1370,11 @@ async function cargarInventarios(){
   if (!state.almacenActual){ $("#sel-inventario").innerHTML = ""; return renderVista(); }
   try{
     state.inventarios = await listChildFolders(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`);
+    const infos = await enParalelo(state.inventarios, (nombre) =>
+      leerInfoInventario(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`)
+    );
     state.inventariosInfo = {};
-    for (const nombre of state.inventarios){
-      const carpeta = `${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`;
-      state.inventariosInfo[nombre] = await leerInfoInventario(carpeta);
-    }
+    state.inventarios.forEach((nombre, i) => { state.inventariosInfo[nombre] = infos[i]; });
   }catch(e){
     if (!esErrorDeRed(e)) throw e;
     // Sin conexión: no mantenemos una copia aparte de "todos los inventarios de este almacén"
