@@ -175,6 +175,18 @@ main{flex:1;padding:16px;padding-bottom:32px;}
 .item-articulo .cod{font-size:.72rem;color:var(--capa-purpura);font-weight:700;letter-spacing:.02em;}
 .item-articulo .desc{font-size:.92rem;font-weight:600;margin-top:2px;color:var(--texto);}
 
+.item-elegir-almacen{
+  text-align:left;background:var(--surface);border:1.5px solid var(--border);border-radius:12px;
+  padding:14px 16px;width:100%;font-size:.95rem;font-weight:600;color:var(--texto);
+  display:flex;align-items:center;justify-content:space-between;gap:10px;
+}
+.item-elegir-almacen:active{border-color:var(--capa-naranja);}
+.item-elegir-almacen.sugerido{border-color:var(--capa-naranja);background:#FFF7EE;}
+.tag-sugerido{
+  font-size:.62rem;color:var(--capa-naranja);font-weight:700;text-transform:uppercase;
+  letter-spacing:.03em;border:1px solid var(--capa-naranja);border-radius:6px;padding:2px 6px;flex-shrink:0;
+}
+
 /* ---------- formulario de registro ---------- */
 .articulo-elegido{
   display:flex;justify-content:space-between;align-items:flex-start;gap:10px;
@@ -438,6 +450,12 @@ nav.tabs svg{width:22px;height:22px;}
     <div class="estado-conexion" id="panel-pendientes" style="display:none;"></div>
   </header>
 
+  <div id="pantalla-elegir-almacen" style="display:none;padding:16px;">
+    <h2 style="font-size:1rem;margin-bottom:4px;">Elige tu almacén</h2>
+    <p style="font-size:.85rem;color:var(--texto-claro);margin:0 0 14px;">Confirma en qué almacén vas a trabajar antes de continuar — esto evita registrar por error en el almacén equivocado tras recargar la página.</p>
+    <div id="lista-elegir-almacen" style="display:flex;flex-direction:column;gap:8px;"></div>
+  </div>
+
   <main id="contenido"></main>
 
   <nav class="tabs">
@@ -474,7 +492,7 @@ const ICONOS = {
 
 // Versión de la app — súbela cada vez que se publique un cambio (y recuerda subir también
 // CACHE_VERSION en sw.js a la vez, para que la caché antigua no se quede pegada).
-const APP_VERSION = "1.6";
+const APP_VERSION = "1.7";
 
 const CONFIG = {
   // Client ID (Id. de aplicación) de tu App Registration en Entra ID
@@ -1598,24 +1616,61 @@ async function arrancarApp(account){
   }
 }
 
-async function cargarAlmacenes(){
+function poblarSelectAlmacenes(){
   // El almacén ya no se crea a mano: la lista sale siempre del maestro "Almacenes.xlsx".
   state.almacenes = state.almacenesMaestro.map(a => a.nombre);
   const sel = $("#sel-almacen");
   sel.innerHTML = state.almacenes.map(a=>`<option value="${a}">${a}</option>`).join("");
-  if (state.almacenes.length){
-    state.almacenActual = state.almacenes[0];
-    sel.value = state.almacenActual;
-    // Nos aseguramos de que la carpeta de ese almacén existe en SharePoint
-    // (antes se creaba con el botón "+ Nuevo almacén"; ahora se crea sola).
-    await ensureFolder(`${CONFIG.ROOT_FOLDER}/${state.almacenActual}`).catch(e=>{ if (!esErrorDeRed(e)) console.error(e); });
-    await cargarInventarios();
+}
+
+// Pantalla intermedia obligatoria tras cargar: nunca se entra directo a un almacén ya puesto
+// (ni siquiera recordado), para evitar que alguien registre por error en el almacén
+// equivocado tras recargar la página. Si hay un "último usado" en ESTE dispositivo, se
+// muestra resaltado el primero de la lista como sugerencia, pero hay que tocarlo igualmente.
+function mostrarPantallaElegirAlmacen(){
+  poblarSelectAlmacenes();
+  const lista = $("#lista-elegir-almacen");
+  if (!state.almacenes.length){
+    lista.innerHTML = `<div class="aviso error">No hay ningún almacén disponible. Revisa que el archivo "${CONFIG.ALMACENES_FILE_PATH}" tenga filas con código y nombre de almacén.</div>`;
   } else {
-    state.almacenActual = "";
-    $("#sel-inventario").innerHTML = "";
-    $("#panel-nuevo-inventario").style.display = "none";
-    renderVista();
+    let ultimoUsado = null;
+    try{ ultimoUsado = localStorage.getItem("capa_ultimo_almacen"); }catch(e){}
+    const ordenados = [...state.almacenes].sort((a,b) => (a===ultimoUsado?-1:0) - (b===ultimoUsado?-1:0));
+    lista.innerHTML = ordenados.map(nombre => {
+      const esUltimo = nombre === ultimoUsado;
+      return `<button class="item-elegir-almacen ${esUltimo?"sugerido":""}" data-almacen="${nombre}">
+        <span>${nombre}</span>
+        ${esUltimo ? '<span class="tag-sugerido">Último usado aquí</span>' : ""}
+      </button>`;
+    }).join("");
+    lista.querySelectorAll("[data-almacen]").forEach(b=>{
+      b.addEventListener("click", ()=> elegirAlmacenInicial(b.dataset.almacen));
+    });
   }
+  document.querySelector(".selectores").style.display = "none";
+  $("#panel-nuevo-inventario").style.display = "none";
+  $("#contenido").style.display = "none";
+  document.querySelector("nav.tabs").style.display = "none";
+  $("#pantalla-elegir-almacen").style.display = "block";
+}
+
+async function elegirAlmacenInicial(nombre){
+  state.almacenActual = nombre;
+  try{ localStorage.setItem("capa_ultimo_almacen", nombre); }catch(e){}
+  $("#sel-almacen").value = nombre;
+
+  $("#pantalla-elegir-almacen").style.display = "none";
+  document.querySelector(".selectores").style.display = "";
+  $("#contenido").style.display = "";
+  document.querySelector("nav.tabs").style.display = "";
+
+  // Nos aseguramos de que la carpeta de ese almacén existe en SharePoint.
+  await ensureFolder(`${CONFIG.ROOT_FOLDER}/${nombre}`).catch(e=>{ if (!esErrorDeRed(e)) console.error(e); });
+  await cargarInventarios();
+}
+
+async function cargarAlmacenes(){
+  mostrarPantallaElegirAlmacen();
 }
 
 async function cargarInventarios(){
