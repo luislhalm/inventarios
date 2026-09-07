@@ -474,7 +474,7 @@ const ICONOS = {
 
 // Versión de la app — súbela cada vez que se publique un cambio (y recuerda subir también
 // CACHE_VERSION en sw.js a la vez, para que la caché antigua no se quede pegada).
-const APP_VERSION = "1.3";
+const APP_VERSION = "1.6";
 
 const CONFIG = {
   // Client ID (Id. de aplicación) de tu App Registration en Entra ID
@@ -585,11 +585,9 @@ function aUnidadBase(totalToneladas, articulo){
   const base = articulo?.unidades?.[0];
 
   if (objetivo){
-    // ¿La columna "unidad" pide directamente toneladas/peso?
-    if (/^t(on|n)\b|tonelad/i.test(objetivo)){
-      return { cantidad: totalToneladas, nombre: objetivo };
-    }
-    // ¿Coincide con alguna de las unidades propias del artículo (Sacos, Cajas, Pallet…)?
+    // ¿Coincide con el nombre de una de las unidades propias del artículo (Sacos, Cajas,
+    // Pallet…)? -> se interpreta como "cuenta en esa unidad concreta" (recupera cuántas
+    // unidades de ESE envase representa el total, usando su propio factor).
     const coincide = articulo.unidades?.find(u =>
       u.nombre.toLowerCase() === objetivo.toLowerCase()
       || u.nombre.toLowerCase().includes(objetivo.toLowerCase())
@@ -598,6 +596,15 @@ function aUnidadBase(totalToneladas, articulo){
     if (coincide && coincide.factor){
       return { cantidad: totalToneladas / coincide.factor, nombre: objetivo };
     }
+    // ¿Es la palabra genérica "Unidades"? -> cuenta en la unidad base del artículo.
+    if (/^unidad(es)?$/i.test(objetivo)){
+      if (base && base.factor) return { cantidad: totalToneladas / base.factor, nombre: objetivo };
+      return { cantidad: totalToneladas, nombre: objetivo };
+    }
+    // Cualquier otra cosa (Tn, Kg, LT, L…) es una medida directa (peso o volumen): el propio
+    // factor de cada unidad YA está expresado en esa medida, así que no se vuelve a dividir,
+    // solo se suman los subtotales tal cual (por eso 3 botes x 5 = 15, no 3÷5).
+    return { cantidad: totalToneladas, nombre: objetivo };
   }
 
   // Sin columna "unidad" aprovechable: usamos la unidad base tradicional (Descrip_Unidad/Conv_unidad)
@@ -1287,7 +1294,7 @@ async function buscarArchivosRotos(){
   while (url){
     const res = await graphFetch(url);
     const data = await res.json();
-    items = items.concat(data.value.filter(i=>i.file));
+    items = items.concat(data.value.filter(i=>i.file && i.name !== NOMBRE_CANDADO));
     url = data["@odata.nextLink"] || null;
   }
 
@@ -1332,6 +1339,40 @@ async function consolidarRegistros(lista){
   await graphBatch(idsUnicos.map(id => ({ id, method:"DELETE", url:`/drives/${state.driveId}/items/${id}` })));
 }
 
+// ---------- candado para evitar que dos consolidaciones se pisen ----------
+// Si dos personas/pestañas disparan la consolidación casi a la vez, ambas pueden leer la
+// misma lista de sueltos ANTES de que ninguna termine de borrarlos, y cada una mete esos
+// mismos registros en su propio archivo consolidado -> duplicados. Un candado sencillo (un
+// archivito con la hora en que se creó) evita que la segunda entre mientras la primera sigue
+// trabajando. No es 100% infalible (hay una pequeña ventana entre comprobar y crear el
+// candado), pero reduce el riesgo real de choque a un margen prácticamente nulo.
+const NOMBRE_CANDADO = "_consolidando.lock";
+async function intentarBloquearConsolidacion(){
+  const carpeta = `${carpetaInventario()}/registros`;
+  try{
+    const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/${NOMBRE_CANDADO}`);
+    const item = await res.json();
+    const antiguedad = Date.now() - new Date(item.lastModifiedDateTime).getTime();
+    if (antiguedad < 5 * 60000) return false; // hay un candado activo de otro proceso
+    // candado viejo (>5 min): asumimos que el proceso anterior se quedó a medias, lo ignoramos
+  }catch(e){
+    if (e.status !== 404) throw e;
+  }
+  await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/${NOMBRE_CANDADO}:/content`, {
+    method:"PUT", headers:{"Content-Type":"application/json"},
+    body: JSON.stringify({ inicio: new Date().toISOString(), usuario: state.account?.username || "" }),
+  });
+  return true;
+}
+async function liberarBloqueoConsolidacion(){
+  const carpeta = `${carpetaInventario()}/registros`;
+  try{
+    const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/${NOMBRE_CANDADO}`);
+    const item = await res.json();
+    await graphFetch(`/drives/${state.driveId}/items/${item.id}`, { method:"DELETE" });
+  }catch(e){ /* si falla, no es grave: el candado caduca solo pasados 5 minutos */ }
+}
+
 async function archivarInventario(){
   const todos = await cargarRegistros();
   const individuales = todos.filter(r => !r._archivado && !r._pendiente);
@@ -1343,9 +1384,17 @@ async function archivarInventario(){
   if (!confirm(`Se van a cerrar ${individuales.length} registros, agrupándolos en ${numBloques} archivo${numBloques===1?"":"s"} de hasta ${TAMANO_BLOQUE_ARCHIVADO} cada uno.\n\nPodrás seguir editando o anulando cualquiera de ellos con normalidad más adelante.\n\n¿Continuar?`)){
     return false;
   }
-  await consolidarRegistros(individuales);
-  state.registrosCacheKey = "";
-  return true;
+  if (!(await intentarBloquearConsolidacion())){
+    alert("Otra persona está cerrando este inventario justo ahora mismo. Espera un minuto y vuelve a intentarlo.");
+    return false;
+  }
+  try{
+    await consolidarRegistros(individuales);
+    state.registrosCacheKey = "";
+    return true;
+  } finally {
+    await liberarBloqueoConsolidacion();
+  }
 }
 
 // Consolidación automática y silenciosa: si se acumulan muchos registros sueltos, junta los
@@ -1367,11 +1416,14 @@ async function autoConsolidarSiHaceFalta(registros){
   });
   if (antiguos.length < AUTOCONSOLIDAR_MINIMO) return;
 
+  if (!(await intentarBloquearConsolidacion().catch(()=>false))) return; // otro proceso ya está en ello, o falló la comprobación: no forzamos
   try{
     await consolidarRegistros(antiguos);
     state.registrosCacheKey = ""; // la próxima vez que se abra este inventario, ya cargará menos archivos
   }catch(e){
     console.error("La consolidación automática en segundo plano ha fallado (no es grave, se reintentará):", e);
+  } finally {
+    await liberarBloqueoConsolidacion();
   }
 }
 
@@ -1467,7 +1519,7 @@ async function cargarRegistros(){
     while (url){
       const res = await graphFetch(url);
       const data = await res.json();
-      items = items.concat(data.value.filter(i=>i.file));
+      items = items.concat(data.value.filter(i=>i.file && i.name !== NOMBRE_CANDADO));
       url = data["@odata.nextLink"] || null;
     }
 
@@ -1679,7 +1731,7 @@ function renderRegistrar(){
           <div class="fila-unidad">
             <div class="info-unidad">
               <div class="nombre-unidad">${u.nombre}</div>
-              <div class="factor-unidad">= ${u.factor.toLocaleString("es-ES",{maximumFractionDigits:4})} Ton/unidad</div>
+              <div class="factor-unidad">= ${u.factor.toLocaleString("es-ES",{maximumFractionDigits:4})} ${art.unidadSistema || "Ton"}/unidad</div>
             </div>
             <div class="stepper-cantidad">
               <button type="button" class="btn-stepper" data-accion="menos" data-idx="${i}" aria-label="Restar">−</button>
@@ -2398,8 +2450,18 @@ document.addEventListener("DOMContentLoaded", async () => {
 
   // Registro del service worker (PWA): permite instalar la app y abrirla aunque no haya
   // conexión (aunque los datos en sí siempre necesitan red, o quedan en la cola de pendientes).
+  // Si detecta que ha entrado en control una versión nueva del service worker mientras la app
+  // está abierta, recarga sola — así nunca te quedas usando JavaScript antiguo en segundo
+  // plano sin darte cuenta (algo especialmente fácil que pase en la app instalada de iPhone,
+  // que a veces tarda en darse cuenta de que hay una versión nueva).
   if ("serviceWorker" in navigator){
     navigator.serviceWorker.register("./sw.js").catch(e => console.error("No se pudo registrar el service worker:", e));
+    let yaRecargando = false;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (yaRecargando) return;
+      yaRecargando = true;
+      window.location.reload();
+    });
   }
 
   await window.__cargaLibs; // espera a que terminen los intentos de carga de librerías
