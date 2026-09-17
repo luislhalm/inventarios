@@ -492,7 +492,7 @@ const ICONOS = {
 
 // Versión de la app — súbela cada vez que se publique un cambio (y recuerda subir también
 // CACHE_VERSION en sw.js a la vez, para que la caché antigua no se quede pegada).
-const APP_VERSION = "1.7";
+const APP_VERSION = "2.4";
 
 const CONFIG = {
   // Client ID (Id. de aplicación) de tu App Registration en Entra ID
@@ -519,6 +519,13 @@ const CONFIG = {
 
   // Déjalo vacío para usar la primera hoja del Excel maestro
   MASTER_SHEET_NAME: "",
+
+  // API de stock en vivo (SQL), en paralelo al Excel manual de "Ver diferencias".
+  // Ya en HTTPS (app.capa.es) — funciona tanto desde local (Live Server) como desde la app real.
+  // OJO: IT ha comentado que puede que muevan esto a otro puerto (ej. 8080) más adelante;
+  // si la URL cambia, hay que actualizar esta línea otra vez.
+  STOCK_API_URL: "https://app.capa.es/StockApi",   // sin barra final
+  STOCK_API_CLIENT_ID: "7e111b26-74c9-4dad-a305-95af0bb33cdf",    // Client ID del registro "API SQL" en Entra ID
 };
 
 // Nombres de columna esperados en el Excel maestro (según jokin Agrupaciones_art_FCAP)
@@ -553,6 +560,7 @@ const state = {
   inventariosInfo: {},
   stockSistema: null,
   stockSistemaCacheKey: "",
+  stockSistemaInfo: null,
   vistaInventarioSub: "resumen",
   almacenActual: "",
   inventarioActual: "",
@@ -812,6 +820,28 @@ async function getToken(){
   }
 }
 
+// Token para la API de stock (SQL) — es un recurso distinto de Graph/SharePoint, así que
+// necesita su propio token, aunque se pida con el mismo login ya iniciado (sin preguntar nada
+// al usuario). Se cachea igual que el de Graph, por separado.
+let tokenCacheStockApi = { valor: null, expira: 0 };
+function scopeStockApi(){
+  return `api://${CONFIG.STOCK_API_CLIENT_ID}/access_as_user`;
+}
+async function getTokenStockApi(){
+  if (!CONFIG.STOCK_API_CLIENT_ID) throw new Error("La API de stock todavía no está configurada (falta STOCK_API_CLIENT_ID).");
+  if (tokenCacheStockApi.valor && Date.now() < tokenCacheStockApi.expira - 60000) return tokenCacheStockApi.valor;
+  const account = msalInstance.getActiveAccount();
+  if (!account) throw new Error("Sesión no iniciada");
+  try{
+    const res = await msalInstance.acquireTokenSilent({ scopes: [scopeStockApi()], account });
+    tokenCacheStockApi = { valor: res.accessToken, expira: res.expiresOn ? res.expiresOn.getTime() : Date.now() + 55*60000 };
+    return res.accessToken;
+  }catch(e){
+    await msalInstance.acquireTokenRedirect({ scopes: [scopeStockApi()] });
+    throw new Error("Redirigiendo para renovar el permiso de acceso a la API de stock…");
+  }
+}
+
 /* ============================================================
    MICROSOFT GRAPH
    ============================================================ */
@@ -1056,56 +1086,89 @@ function buscarColumnaLibre(fila, ...posibles){
   return null;
 }
 
-const NOMBRE_ARCHIVO_STOCK_SISTEMA = "_stock_sistema.xlsx";
+// Consulta el stock de sistema en vivo a través de la API (SQL), en vez de leer un Excel.
+async function cargarStockDesdeAPI(){
+  if (!CONFIG.STOCK_API_URL || !CONFIG.STOCK_API_CLIENT_ID){
+    throw new Error("La API de stock todavía no está configurada en esta app (faltan STOCK_API_URL / STOCK_API_CLIENT_ID).");
+  }
+  const info = state.inventariosInfo?.[state.inventarioActual];
+  if (!info?.fecha){
+    throw new Error("Este inventario no tiene guardada una fecha de recuento, así que no se puede pedir el stock del sistema a esa fecha.");
+  }
+  const almacenInfo = state.almacenesMaestro?.find(a => a.nombre === state.almacenActual);
+  if (!almacenInfo?.codigo){
+    throw new Error("No se encuentra el código de este almacén en el maestro de almacenes.");
+  }
 
-async function subirStockSistema(file){
-  const buf = await file.arrayBuffer();
-  const carpeta = carpetaInventario();
-  await ensureFolder(carpeta);
-  await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/${NOMBRE_ARCHIVO_STOCK_SISTEMA}:/content`, {
-    method:"PUT",
-    headers:{"Content-Type":"application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"},
-    body: buf,
+  const token = await getTokenStockApi();
+  const url = `${CONFIG.STOCK_API_URL}/api/stock?almacen=${encodeURIComponent(almacenInfo.codigo)}&fecha=${encodeURIComponent(info.fecha)}`;
+  const res = await fetch(url, { headers: { "Authorization": `Bearer ${token}` } });
+  if (!res.ok){
+    const texto = await res.text().catch(()=> "");
+    const err = new Error(`La API de stock respondió ${res.status}${texto ? ": " + texto : ""}`);
+    err.status = res.status;
+    throw err;
+  }
+  const filas = await res.json();
+
+  const mapa = new Map();
+  for (const fila of filas){
+    const codigo = String(fila.codigo ?? "").trim();
+    if (!codigo) continue;
+    const c00 = Number(fila.cantidad00) || 0;
+    const c10 = Number(fila.cantidad10) || 0;
+    const c20 = Number(fila.cantidad20) || 0;
+    mapa.set(codigo, {
+      codigo,
+      descripcion: String(fila.descripcion ?? "").trim(),
+      c00, c10, c20, total: c00+c10+c20,
+    });
+  }
+  state.stockSistema = mapa;
+  state.stockSistemaCacheKey = carpetaInventario();
+  state.stockSistemaInfo = {
+    consultadoEn: new Date().toISOString(),
+    consultadoPor: state.account?.name || state.account?.username || "",
+  };
+  await guardarSnapshotStockSistema(mapa, state.stockSistemaInfo).catch(e=>{
+    // Si falla el guardado, no bloqueamos la consulta que ya se ha hecho — solo avisamos.
+    console.error("No se pudo guardar el snapshot de stock de sistema:", e);
   });
-  state.stockSistemaCacheKey = ""; // invalida caché
+  return mapa;
 }
 
-async function cargarStockSistema(){
+const NOMBRE_SNAPSHOT_STOCK_SISTEMA = "_stock_sistema.json";
+
+// Guarda en la carpeta del inventario la última consulta a la API de stock, para que
+// cualquiera que abra "Ver diferencias" vea esa foto sin tener que consultar la API otra vez.
+async function guardarSnapshotStockSistema(mapa, meta){
+  const carpeta = carpetaInventario();
+  await ensureFolder(carpeta);
+  const payload = { ...meta, datos: Array.from(mapa.values()) };
+  await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpeta)}/${NOMBRE_SNAPSHOT_STOCK_SISTEMA}:/content`, {
+    method:"PUT",
+    headers:{"Content-Type":"application/json"},
+    body: JSON.stringify(payload),
+  });
+}
+
+// Lee esa última consulta guardada (si existe) para el inventario actual.
+async function leerSnapshotStockSistema(){
   const clave = carpetaInventario();
-  if (state.stockSistemaCacheKey === clave) return state.stockSistema;
-
   try{
-    const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(clave)}/${NOMBRE_ARCHIVO_STOCK_SISTEMA}:/content`);
-    const buf = await res.arrayBuffer();
-    const wb = XLSX.read(buf, { type:"array" });
-    const ws = wb.Sheets[wb.SheetNames[0]];
-    // Leemos por posición de columna, no por nombre de encabezado (el encabezado
-    // solo se usa para saltar la primera fila): 1ª código, 2ª descripción,
-    // 3ª/4ª/5ª cantidad en ubicación 00/10/20.
-    const filas = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", range:1 });
-
+    const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(clave)}/${NOMBRE_SNAPSHOT_STOCK_SISTEMA}:/content`);
+    const payload = await res.json();
     const mapa = new Map();
-    for (const fila of filas){
-      const codigo = String(fila[0] ?? "").trim();
-      if (!codigo) continue;
-      const c00 = parseNum(fila[2]);
-      const c10 = parseNum(fila[3]);
-      const c20 = parseNum(fila[4]);
-      mapa.set(codigo, {
-        codigo,
-        descripcion: String(fila[1] ?? "").trim(),
-        c00, c10, c20, total: c00+c10+c20,
-      });
+    for (const fila of (payload.datos || [])){
+      const codigo = String(fila.codigo ?? "").trim();
+      if (codigo) mapa.set(codigo, fila);
     }
     state.stockSistema = mapa;
     state.stockSistemaCacheKey = clave;
+    state.stockSistemaInfo = { consultadoEn: payload.consultadoEn || null, consultadoPor: payload.consultadoPor || "" };
     return mapa;
   }catch(e){
-    if (e.status === 404){
-      state.stockSistema = null;
-      state.stockSistemaCacheKey = clave;
-      return null;
-    }
+    if (e.status === 404) return null;
     throw e;
   }
 }
@@ -1673,6 +1736,18 @@ async function cargarAlmacenes(){
   mostrarPantallaElegirAlmacen();
 }
 
+// Recuerda, por almacén y en ESTE dispositivo, cuál fue el último inventario (mes) abierto —
+// así al recargar se reabre ese, no simplemente "el más reciente por nombre".
+function claveUltimoInventario(almacen){
+  return `capa_ultimo_inventario_${almacen}`;
+}
+function recordarInventario(almacen, nombre){
+  try{ localStorage.setItem(claveUltimoInventario(almacen), nombre); }catch(e){}
+}
+function leerUltimoInventarioRecordado(almacen){
+  try{ return localStorage.getItem(claveUltimoInventario(almacen)); }catch(e){ return null; }
+}
+
 async function cargarInventarios(){
   if (!state.almacenActual){ $("#sel-inventario").innerHTML = ""; return renderVista(); }
   try{
@@ -1699,7 +1774,8 @@ async function cargarInventarios(){
     return `<option value="${i}">${etiqueta}</option>`;
   }).join("") + `<option value="__nuevo__">+ Nuevo inventario…</option>`;
   if (state.inventarios.length){
-    state.inventarioActual = state.inventarios[0];
+    const recordado = leerUltimoInventarioRecordado(state.almacenActual);
+    state.inventarioActual = (recordado && state.inventarios.includes(recordado)) ? recordado : state.inventarios[0];
     sel.value = state.inventarioActual;
     $("#panel-nuevo-inventario").style.display = "none";
   } else {
@@ -2296,48 +2372,50 @@ async function renderDiferencias(registros){
   const sub = $("#contenido-subvista");
   sub.innerHTML = `<div class="spinner"></div>`;
 
-  let stock;
-  try{
-    stock = await cargarStockSistema();
-  }catch(e){
-    console.error(e);
-    sub.innerHTML = `<div class="aviso error">No se pudo comprobar el stock de sistema: ${e.message}</div>`;
-    return;
+  // Si no hay nada en memoria de esta sesión, intentamos leer la última consulta ya
+  // guardada en SharePoint por cualquiera (así no hace falta pedirle a la API cada vez).
+  let stock = (state.stockSistemaCacheKey === carpetaInventario()) ? state.stockSistema : null;
+  if (!stock){
+    try{ stock = await leerSnapshotStockSistema(); }
+    catch(e){ console.error("No se pudo leer el snapshot guardado de stock de sistema:", e); }
   }
 
   const recuentoMap = agregarPorArticuloYUbicacion(registros);
 
+  const apiConfigurada = !!(CONFIG.STOCK_API_URL && CONFIG.STOCK_API_CLIENT_ID);
+  const infoConsulta = state.stockSistemaInfo;
   const cabeceraCarga = `
     <div class="tarjeta">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
         <div>
           <div style="font-weight:700;font-size:.9rem;">Stock de sistema</div>
-          <div style="font-size:.78rem;color:var(--texto-claro);">${stock ? `Cargado · ${stock.size} artículos` : "Todavía no se ha cargado ningún Excel para este inventario"}</div>
+          <div style="font-size:.78rem;color:var(--texto-claro);">
+            ${stock
+              ? `Consultado ${infoConsulta?.consultadoEn ? "el " + fmtFecha(infoConsulta.consultadoEn) : ""}${infoConsulta?.consultadoPor ? " por " + infoConsulta.consultadoPor : ""} · ${stock.size} artículos`
+              : "Todavía no se ha consultado para este inventario"}
+          </div>
         </div>
         <div style="display:flex;flex-direction:column;gap:8px;align-items:stretch;">
-          <input type="file" id="input-stock-sistema" accept=".xlsx,.xls" style="display:none;">
-          <button class="btn-secundario" id="btn-cargar-stock" style="width:auto;padding:9px 14px;">${stock ? ICONOS.subir+"Reemplazar Excel" : ICONOS.subir+"Cargar stock del sistema (Excel)"}</button>
+          ${apiConfigurada
+            ? `<button class="btn-secundario" id="btn-actualizar-stock-api" style="width:auto;padding:9px 14px;">${ICONOS.subir}${stock ? "Actualizar" : "Consultar"} desde sistema (SQL)</button>`
+            : `<div class="aviso info" style="margin:0;font-size:.75rem;">La API de stock todavía no está configurada (faltan STOCK_API_URL / STOCK_API_CLIENT_ID en CONFIG).</div>`}
           ${stock ? `<button class="btn-secundario" id="btn-exportar-diferencias" style="width:auto;padding:9px 14px;">${ICONOS.descargar}Exportar diferencias</button>` : ""}
         </div>
       </div>
-      <div style="font-size:.72rem;color:var(--texto-claro);margin-top:8px;">Formato esperado: código artículo, descripción, cantidad 00, cantidad 10, cantidad 20 (con encabezado).</div>
     </div>`;
 
   $("#contenido-subvista").innerHTML = cabeceraCarga + (stock ? `<div id="tabla-diferencias-cont"></div>` : "");
 
-  $("#btn-cargar-stock").addEventListener("click", ()=> $("#input-stock-sistema").click());
-  $("#input-stock-sistema").addEventListener("change", async (e)=>{
-    const file = e.target.files[0];
-    if (!file) return;
-    const btn = $("#btn-cargar-stock");
-    btn.disabled = true; btn.textContent = "Cargando…";
+  $("#btn-actualizar-stock-api")?.addEventListener("click", async ()=>{
+    const btn = $("#btn-actualizar-stock-api");
+    btn.disabled = true; btn.textContent = "Consultando…";
     try{
-      await subirStockSistema(file);
+      await cargarStockDesdeAPI();
       await renderDiferencias(registros);
     }catch(err){
       console.error(err);
-      alert("No se pudo cargar el Excel: " + err.message);
-      btn.disabled = false;
+      alert("No se pudo consultar la API de stock: " + err.message);
+      btn.disabled = false; btn.innerHTML = ICONOS.subir + (stock ? "Actualizar" : "Consultar") + " desde sistema (SQL)";
     }
   });
 
@@ -2564,6 +2642,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     state.inventarioActual = e.target.value;
+    recordarInventario(state.almacenActual, state.inventarioActual);
     state.articuloSeleccionado = null;
     state.editandoId = null;
     state.vistaInventarioSub = "resumen";
@@ -2590,6 +2669,7 @@ document.addEventListener("DOMContentLoaded", async () => {
       await cargarInventarios();
       $("#sel-inventario").value = nombre;
       state.inventarioActual = nombre;
+      recordarInventario(state.almacenActual, nombre);
       renderVista();
     }catch(e){
       console.error(e);
