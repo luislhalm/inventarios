@@ -444,6 +444,17 @@ nav.tabs svg{width:22px;height:22px;}
 
     <div class="estado-conexion" id="info-inventario-actual" style="display:none;"></div>
 
+    <div id="panel-editar-fecha-inventario" style="display:none" class="crear-inline crear-inline-col">
+      <div class="crear-inline-fila">
+        <label class="etiqueta-mini" for="input-editar-fecha-inventario">Nueva fecha y hora del recuento</label>
+        <input id="input-editar-fecha-inventario" type="datetime-local">
+      </div>
+      <div style="display:flex;gap:8px;">
+        <button id="btn-guardar-fecha-inventario" style="flex:1;">Guardar fecha</button>
+        <button id="btn-cancelar-fecha-inventario" class="btn-secundario" style="flex:1;">Cancelar</button>
+      </div>
+    </div>
+
     <div class="estado-conexion" id="estado-conexion">
       <span class="punto"></span> Conectando con SharePoint…
     </div>
@@ -492,7 +503,7 @@ const ICONOS = {
 
 // Versión de la app — súbela cada vez que se publique un cambio (y recuerda subir también
 // CACHE_VERSION en sw.js a la vez, para que la caché antigua no se quede pegada).
-const APP_VERSION = "2.4";
+const APP_VERSION = "2.5";
 
 const CONFIG = {
   // Client ID (Id. de aplicación) de tu App Registration en Entra ID
@@ -1129,6 +1140,7 @@ async function cargarStockDesdeAPI(){
   state.stockSistemaInfo = {
     consultadoEn: new Date().toISOString(),
     consultadoPor: state.account?.name || state.account?.username || "",
+    fechaStock: info.fecha, // fecha del recuento a la que se pidió este stock al sistema
   };
   await guardarSnapshotStockSistema(mapa, state.stockSistemaInfo).catch(e=>{
     // Si falla el guardado, no bloqueamos la consulta que ya se ha hecho — solo avisamos.
@@ -1165,7 +1177,7 @@ async function leerSnapshotStockSistema(){
     }
     state.stockSistema = mapa;
     state.stockSistemaCacheKey = clave;
-    state.stockSistemaInfo = { consultadoEn: payload.consultadoEn || null, consultadoPor: payload.consultadoPor || "" };
+    state.stockSistemaInfo = { consultadoEn: payload.consultadoEn || null, consultadoPor: payload.consultadoPor || "", fechaStock: payload.fechaStock || null };
     return mapa;
   }catch(e){
     if (e.status === 404) return null;
@@ -2384,6 +2396,9 @@ async function renderDiferencias(registros){
 
   const apiConfigurada = !!(CONFIG.STOCK_API_URL && CONFIG.STOCK_API_CLIENT_ID);
   const infoConsulta = state.stockSistemaInfo;
+  const fechaRecuentoActual = state.inventariosInfo?.[state.inventarioActual]?.fecha;
+  const stockDeOtraFecha = !!(stock && infoConsulta?.fechaStock && fechaRecuentoActual &&
+    new Date(infoConsulta.fechaStock).getTime() !== new Date(fechaRecuentoActual).getTime());
   const cabeceraCarga = `
     <div class="tarjeta">
       <div style="display:flex;justify-content:space-between;align-items:center;gap:10px;flex-wrap:wrap;">
@@ -2394,6 +2409,8 @@ async function renderDiferencias(registros){
               ? `Consultado ${infoConsulta?.consultadoEn ? "el " + fmtFecha(infoConsulta.consultadoEn) : ""}${infoConsulta?.consultadoPor ? " por " + infoConsulta.consultadoPor : ""} · ${stock.size} artículos`
               : "Todavía no se ha consultado para este inventario"}
           </div>
+          ${stock && infoConsulta?.fechaStock ? `<div style="font-size:.75rem;color:var(--texto-claro);">Stock a fecha ${fmtFecha(infoConsulta.fechaStock)}</div>` : ""}
+          ${stockDeOtraFecha ? `<div class="aviso info" style="margin:6px 0 0;font-size:.75rem;">La fecha del recuento ha cambiado (ahora ${fmtFecha(fechaRecuentoActual)}). Pulsa "Actualizar" para pedir el stock a la nueva fecha.</div>` : ""}
         </div>
         <div style="display:flex;flex-direction:column;gap:8px;align-items:stretch;">
           ${apiConfigurada
@@ -2563,9 +2580,68 @@ function actualizarInfoInventarioActual(){
   const info = state.inventariosInfo?.[state.inventarioActual];
   if (state.inventarioActual && info?.fecha){
     el.style.display = "flex";
-    el.innerHTML = `<span class="punto ok"></span> Recuento del ${fmtFecha(info.fecha)}${info.creadoPor ? " · creado por " + info.creadoPor : ""}`;
+    el.innerHTML = `<span class="punto ok"></span> Recuento del ${fmtFecha(info.fecha)}${info.creadoPor ? " · creado por " + info.creadoPor : ""} · <a href="#" id="btn-cambiar-fecha-inventario" style="color:var(--capa-naranja-dark);font-weight:600;">Cambiar fecha</a>`;
+    $("#btn-cambiar-fecha-inventario").addEventListener("click", (e)=>{ e.preventDefault(); abrirEditorFechaInventario(); });
   } else {
     el.style.display = "none";
+    $("#panel-editar-fecha-inventario").style.display = "none";
+  }
+}
+
+// Convierte un ISO (UTC) al formato que espera <input type="datetime-local"> (hora local del dispositivo).
+function isoAFechaHoraLocalInput(iso){
+  const d = new Date(iso);
+  d.setMinutes(d.getMinutes() - d.getTimezoneOffset());
+  return d.toISOString().slice(0,16);
+}
+
+function abrirEditorFechaInventario(){
+  const info = state.inventariosInfo?.[state.inventarioActual];
+  if (!state.inventarioActual || !info?.fecha) return;
+  $("#input-editar-fecha-inventario").value = isoAFechaHoraLocalInput(info.fecha);
+  $("#panel-editar-fecha-inventario").style.display = "flex";
+  $("#panel-editar-fecha-inventario").scrollIntoView({behavior:"smooth", block:"center"});
+}
+
+// Cambia la fecha y hora del recuento de un inventario ya creado (aunque tenga movimientos).
+// No toca ningún registro: solo el _info.json del inventario. Al volver a consultar el stock
+// de sistema (SQL), se pedirá a la nueva fecha.
+async function guardarFechaInventario(){
+  const valor = $("#input-editar-fecha-inventario").value;
+  if (!valor){ alert("Indica una fecha y hora."); return; }
+  if (!navigator.onLine){ alert("Sin conexión: no se puede cambiar la fecha ahora mismo. Inténtalo cuando vuelvas a tener red."); return; }
+
+  const nombre = state.inventarioActual;
+  const carpeta = `${CONFIG.ROOT_FOLDER}/${state.almacenActual}/${nombre}`;
+  const nuevaFechaISO = new Date(valor).toISOString();
+  const btn = $("#btn-guardar-fecha-inventario");
+  btn.disabled = true; btn.textContent = "Guardando…";
+  try{
+    // Releemos el _info.json justo antes de escribir, para no pisar nada que haya cambiado otro usuario.
+    const actual = (await leerInfoInventario(carpeta)) || state.inventariosInfo?.[nombre] || {};
+    if (actual.fecha === nuevaFechaISO){
+      $("#panel-editar-fecha-inventario").style.display = "none";
+      return;
+    }
+    const nuevo = {
+      ...actual,
+      fecha: nuevaFechaISO,
+      fechaAnterior: actual.fecha || null,
+      fechaModificadaPor: state.account?.name || state.account?.username || "",
+      fechaModificadaEn: new Date().toISOString(),
+    };
+    await guardarInfoInventario(carpeta, nuevo);
+    state.inventariosInfo[nombre] = nuevo;
+    // Refrescamos la etiqueta del desplegable de inventarios
+    const opt = Array.from($("#sel-inventario").options).find(o => o.value === nombre);
+    if (opt) opt.textContent = `${nombre} — ${fmtFecha(nuevaFechaISO)}`;
+    $("#panel-editar-fecha-inventario").style.display = "none";
+    renderVista();
+  }catch(e){
+    console.error(e);
+    alert("No se pudo cambiar la fecha: " + e.message);
+  }finally{
+    btn.disabled = false; btn.textContent = "Guardar fecha";
   }
 }
 
@@ -2642,12 +2718,16 @@ document.addEventListener("DOMContentLoaded", async () => {
       return;
     }
     state.inventarioActual = e.target.value;
+    $("#panel-editar-fecha-inventario").style.display = "none";
     recordarInventario(state.almacenActual, state.inventarioActual);
     state.articuloSeleccionado = null;
     state.editandoId = null;
     state.vistaInventarioSub = "resumen";
     renderVista();
   });
+
+  $("#btn-guardar-fecha-inventario").addEventListener("click", guardarFechaInventario);
+  $("#btn-cancelar-fecha-inventario").addEventListener("click", ()=>{ $("#panel-editar-fecha-inventario").style.display = "none"; });
 
   $("#btn-crear-inventario").addEventListener("click", async ()=>{
     const nombre = sanitizeNombre(mesInventarioSeleccionado());
