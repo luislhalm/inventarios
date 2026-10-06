@@ -503,7 +503,7 @@ const ICONOS = {
 
 // Versión de la app — súbela cada vez que se publique un cambio (y recuerda subir también
 // CACHE_VERSION en sw.js a la vez, para que la caché antigua no se quede pegada).
-const APP_VERSION = "2.6";
+const APP_VERSION = "2.8";
 
 const CONFIG = {
   // Client ID (Id. de aplicación) de tu App Registration en Entra ID
@@ -560,6 +560,7 @@ const state = {
   almacenesMaestro: [],
   avisosMaestros: [],
   almacenesPorNombre: new Map(),
+  almacenesPorCodigo: new Map(),
   almacenes: [],
   inventarios: [],
   inventariosInfo: {},
@@ -1089,6 +1090,14 @@ async function loadAlmacenesMaestro(){
     .filter(a => a.nombre)
     .sort((a,b) => a.codigo.localeCompare(b.codigo, "es", {numeric:true}));
   state.almacenesPorNombre = new Map(state.almacenesMaestro.map(a => [a.nombre, a]));
+  state.almacenesPorCodigo = new Map(state.almacenesMaestro.map(a => [a.codigo, a]));
+}
+
+// "state.almacenActual" guarda el CÓDIGO del almacén (xalmacen_id), no su nombre: la carpeta de
+// SharePoint de cada almacén se llama como su código, así que si el nombre cambia en el sistema,
+// la carpeta (y todos sus inventarios) siguen siendo los mismos.
+function nombreAlmacenActual(){
+  return state.almacenesPorCodigo.get(state.almacenActual)?.nombre || state.almacenActual;
 }
 
 /* ---------- registros ---------- */
@@ -1141,7 +1150,7 @@ async function cargarStockDesdeAPI(){
   if (!info?.fecha){
     throw new Error("Este inventario no tiene guardada una fecha de recuento, así que no se puede pedir el stock del sistema a esa fecha.");
   }
-  const almacenInfo = state.almacenesMaestro?.find(a => a.nombre === state.almacenActual);
+  const almacenInfo = state.almacenesPorCodigo?.get(state.almacenActual);
   if (!almacenInfo?.codigo){
     throw new Error("No se encuentra el código de este almacén en el maestro de almacenes.");
   }
@@ -1287,11 +1296,23 @@ function esErrorDeRed(e){
   return /failed to fetch|networkerror|network request failed|load failed/i.test(String(e?.message || e || ""));
 }
 
+// Las operaciones guardadas sin conexión ANTES de pasar a carpetas por código llevan la ruta con el
+// nombre del almacén; aquí se traducen al código. Las nuevas ya llevan "almacenId" y su ruta correcta.
+function carpetaDeOperacion(op){
+  if (op.almacenId) return op.carpeta;
+  const alm = state.almacenesPorNombre.get(op.almacen);
+  const prefijoViejo = `${CONFIG.ROOT_FOLDER}/${op.almacen}/`;
+  if (alm && op.carpeta && op.carpeta.startsWith(prefijoViejo)){
+    return `${CONFIG.ROOT_FOLDER}/${alm.codigo}/${op.carpeta.slice(prefijoViejo.length)}`;
+  }
+  return op.carpeta;
+}
+
 async function mezclarConPendientes(registrosBase, carpetaClave){
   let cola = [];
   try{ cola = await colaListar(); }catch(e){ return registrosBase; }
   const carpetaRegistros = `${carpetaClave}/registros`;
-  const pendientes = cola.filter(op => op.carpeta === carpetaRegistros);
+  const pendientes = cola.filter(op => carpetaDeOperacion(op) === carpetaRegistros);
   if (!pendientes.length) return registrosBase;
   let resultado = registrosBase.map(r => ({...r}));
   for (const op of pendientes){
@@ -1314,10 +1335,13 @@ async function sincronizarPendientes(){
     const cola = await colaListar();
     for (const op of cola){
       if (op.estado === "conflicto") continue;
+      // Operación antigua (ruta con nombre de almacén) y aún sin maestro de almacenes cargado: esperamos.
+      if (!op.almacenId && !state.almacenesMaestro.length) continue;
       try{
         if (op.tipo === "crear"){
-          await ensureFolder(op.carpeta);
-          await graphFetch(`/drives/${state.driveId}/root:/${encPath(op.carpeta)}/${op.nombreArchivo}:/content`, {
+          const carpetaOp = carpetaDeOperacion(op);
+          await ensureFolder(carpetaOp);
+          await graphFetch(`/drives/${state.driveId}/root:/${encPath(carpetaOp)}/${op.nombreArchivo}:/content`, {
             method:"PUT", headers:{"Content-Type":"application/json"}, body: JSON.stringify(op.registro),
           });
           await colaEliminar(op.id);
@@ -1733,9 +1757,9 @@ async function arrancarApp(account){
 
 function poblarSelectAlmacenes(){
   // El almacén ya no se crea a mano: la lista sale siempre de la API (/api/inventarios/almacenes).
-  state.almacenes = state.almacenesMaestro.map(a => a.nombre);
+  state.almacenes = state.almacenesMaestro; // objetos { codigo, nombre }
   const sel = $("#sel-almacen");
-  sel.innerHTML = state.almacenes.map(a=>`<option value="${a}">${a}</option>`).join("");
+  sel.innerHTML = state.almacenes.map(a=>`<option value="${a.codigo}">${a.nombre}</option>`).join("");
 }
 
 // Pantalla intermedia obligatoria tras cargar: nunca se entra directo a un almacén ya puesto
@@ -1750,11 +1774,15 @@ function mostrarPantallaElegirAlmacen(){
   } else {
     let ultimoUsado = null;
     try{ ultimoUsado = localStorage.getItem("capa_ultimo_almacen"); }catch(e){}
-    const ordenados = [...state.almacenes].sort((a,b) => (a===ultimoUsado?-1:0) - (b===ultimoUsado?-1:0));
-    lista.innerHTML = ordenados.map(nombre => {
-      const esUltimo = nombre === ultimoUsado;
-      return `<button class="item-elegir-almacen ${esUltimo?"sugerido":""}" data-almacen="${nombre}">
-        <span>${nombre}</span>
+    // Antes se guardaba el nombre del almacén; ahora el código. Aceptamos los dos.
+    if (ultimoUsado && !state.almacenesPorCodigo.has(ultimoUsado)){
+      ultimoUsado = state.almacenesPorNombre.get(ultimoUsado)?.codigo || null;
+    }
+    const ordenados = [...state.almacenes].sort((a,b) => (a.codigo===ultimoUsado?-1:0) - (b.codigo===ultimoUsado?-1:0));
+    lista.innerHTML = ordenados.map(a => {
+      const esUltimo = a.codigo === ultimoUsado;
+      return `<button class="item-elegir-almacen ${esUltimo?"sugerido":""}" data-almacen="${a.codigo}">
+        <span>${a.nombre}</span>
         ${esUltimo ? '<span class="tag-sugerido">Último usado aquí</span>' : ""}
       </button>`;
     }).join("");
@@ -1769,18 +1797,18 @@ function mostrarPantallaElegirAlmacen(){
   $("#pantalla-elegir-almacen").style.display = "block";
 }
 
-async function elegirAlmacenInicial(nombre){
-  state.almacenActual = nombre;
-  try{ localStorage.setItem("capa_ultimo_almacen", nombre); }catch(e){}
-  $("#sel-almacen").value = nombre;
+async function elegirAlmacenInicial(codigo){
+  state.almacenActual = codigo;
+  try{ localStorage.setItem("capa_ultimo_almacen", codigo); }catch(e){}
+  $("#sel-almacen").value = codigo;
 
   $("#pantalla-elegir-almacen").style.display = "none";
   document.querySelector(".selectores").style.display = "";
   $("#contenido").style.display = "";
   document.querySelector("nav.tabs").style.display = "";
 
-  // Nos aseguramos de que la carpeta de ese almacén existe en SharePoint.
-  await ensureFolder(`${CONFIG.ROOT_FOLDER}/${nombre}`).catch(e=>{ if (!esErrorDeRed(e)) console.error(e); });
+  // Nos aseguramos de que la carpeta de ese almacén (por código) existe en SharePoint.
+  await ensureFolder(`${CONFIG.ROOT_FOLDER}/${codigo}`).catch(e=>{ if (!esErrorDeRed(e)) console.error(e); });
   await cargarInventarios();
 }
 
@@ -1797,7 +1825,13 @@ function recordarInventario(almacen, nombre){
   try{ localStorage.setItem(claveUltimoInventario(almacen), nombre); }catch(e){}
 }
 function leerUltimoInventarioRecordado(almacen){
-  try{ return localStorage.getItem(claveUltimoInventario(almacen)); }catch(e){ return null; }
+  try{
+    const porCodigo = localStorage.getItem(claveUltimoInventario(almacen));
+    if (porCodigo) return porCodigo;
+    // Clave antigua (por nombre de almacén), de antes de pasar a código
+    const nombre = state.almacenesPorCodigo.get(almacen)?.nombre;
+    return nombre ? localStorage.getItem(claveUltimoInventario(nombre)) : null;
+  }catch(e){ return null; }
 }
 
 async function cargarInventarios(){
@@ -1852,7 +1886,7 @@ function renderRegistrar(){
   }
   if (!state.inventarioActual){
     cont.innerHTML = `
-      <div class="aviso info">Elige o crea un inventario (recuento) para "${state.almacenActual}".</div>
+      <div class="aviso info">Elige o crea un inventario (recuento) para "${nombreAlmacenActual()}".</div>
       <div style="display:flex;flex-direction:column;gap:10px;">
         ${state.inventarios.length ? `<button class="btn-secundario" id="btn-cta-abrir-inventario">${ICONOS.carpeta}Abrir inventario existente</button>` : ''}
         <button class="btn-primario" id="btn-cta-crear-inventario">${ICONOS.mas}Nuevo inventario</button>
@@ -2030,7 +2064,7 @@ function renderRegistrar(){
         fecha: editando ? (original?.fecha || new Date().toISOString()) : new Date().toISOString(),
         usuario: state.account.name || state.account.username,
         usuarioEmail: state.account.username,
-        almacen: state.almacenActual,
+        almacen: nombreAlmacenActual(), almacenId: state.almacenActual,
         inventario: state.inventarioActual,
         codigo: art.codigo,
         descripcion: art.descripcion,
@@ -2069,7 +2103,7 @@ function renderRegistrar(){
             fecha: editando ? (await cargarRegistros()).find(r=>r._fileId===state.editandoId)?.fecha || new Date().toISOString() : new Date().toISOString(),
             usuario: state.account.name || state.account.username,
             usuarioEmail: state.account.username,
-            almacen: state.almacenActual,
+            almacen: nombreAlmacenActual(), almacenId: state.almacenActual,
             inventario: state.inventarioActual,
             codigo: art.codigo,
             descripcion: art.descripcion,
@@ -2088,7 +2122,7 @@ function renderRegistrar(){
               const original2 = (await cargarRegistros()).find(r=>r._fileId===state.editandoId);
               await colaAgregar({
                 tipo:"editar", fileId: state.editandoId, modificadoConocido: original2?._modificado || null,
-                carpeta, registro, almacen: state.almacenActual, inventario: state.inventarioActual,
+                carpeta, registro, almacen: nombreAlmacenActual(), almacenId: state.almacenActual, inventario: state.inventarioActual,
                 estado:"pendiente", creadoEn: new Date().toISOString(),
               });
             }
@@ -2097,7 +2131,7 @@ function renderRegistrar(){
             const nombreArchivo = `${Date.now()}_${sufijo}_${sanitizeNombre(registro.codigo)}.json`;
             await colaAgregar({
               tipo:"crear", nombreArchivo, carpeta, registro,
-              almacen: state.almacenActual, inventario: state.inventarioActual,
+              almacen: nombreAlmacenActual(), almacenId: state.almacenActual, inventario: state.inventarioActual,
               estado:"pendiente", creadoEn: new Date().toISOString(),
             });
           }
@@ -2221,7 +2255,7 @@ async function renderInventario(){
   }
   if (!state.inventarioActual){
     cont.innerHTML = `
-      <div class="aviso info">Elige o crea un inventario (recuento) para ver su resumen en "${state.almacenActual}".</div>
+      <div class="aviso info">Elige o crea un inventario (recuento) para ver su resumen en "${nombreAlmacenActual()}".</div>
       <div style="display:flex;flex-direction:column;gap:10px;">
         ${state.inventarios.length ? `<button class="btn-secundario" id="btn-cta-abrir-inventario">${ICONOS.carpeta}Abrir inventario existente</button>` : ''}
         <button class="btn-primario" id="btn-cta-crear-inventario">${ICONOS.mas}Nuevo inventario</button>
@@ -2393,7 +2427,8 @@ async function renderInventario(){
     const wb = XLSX.utils.book_new();
     const infoActual = state.inventariosInfo?.[state.inventarioActual];
     const wsInfo = XLSX.utils.aoa_to_sheet([
-      ["Almacén", state.almacenActual],
+      ["Almacén", nombreAlmacenActual()],
+      ["Código de almacén", state.almacenActual],
       ["Inventario", state.inventarioActual],
       ["Fecha y hora del recuento", infoActual?.fecha ? fmtFecha(infoActual.fecha) : ""],
       ["Creado por", infoActual?.creadoPor || ""],
@@ -2416,7 +2451,7 @@ async function renderInventario(){
     const wsDetalle = XLSX.utils.json_to_sheet(detalle);
     XLSX.utils.book_append_sheet(wb, wsDetalle, "Detalle");
 
-    XLSX.writeFile(wb, `Inventario_${sanitizeNombre(state.almacenActual)}_${sanitizeNombre(state.inventarioActual)}.xlsx`);
+    XLSX.writeFile(wb, `Inventario_${sanitizeNombre(nombreAlmacenActual())}_${sanitizeNombre(state.inventarioActual)}.xlsx`);
   });
 }
 
@@ -2600,7 +2635,7 @@ async function renderDiferencias(registros){
       "Diferencia 00": Number(x.dif00.toFixed(3)), "Diferencia 10": Number(x.dif10.toFixed(3)), "Diferencia 20": Number(x.dif20.toFixed(3)), "Diferencia Total": Number(x.difTotal.toFixed(3)),
     })));
     XLSX.utils.book_append_sheet(wb, ws, "Diferencias");
-    XLSX.writeFile(wb, `Diferencias_${sanitizeNombre(state.almacenActual)}_${sanitizeNombre(state.inventarioActual)}.xlsx`);
+    XLSX.writeFile(wb, `Diferencias_${sanitizeNombre(nombreAlmacenActual())}_${sanitizeNombre(state.inventarioActual)}.xlsx`);
   });
 }
 
