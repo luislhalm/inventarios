@@ -503,7 +503,7 @@ const ICONOS = {
 
 // Versión de la app — súbela cada vez que se publique un cambio (y recuerda subir también
 // CACHE_VERSION en sw.js a la vez, para que la caché antigua no se quede pegada).
-const APP_VERSION = "2.8";
+const APP_VERSION = "2.10";
 
 const CONFIG = {
   // Client ID (Id. de aplicación) de tu App Registration en Entra ID
@@ -925,16 +925,25 @@ async function enParalelo(items, tarea, concurrencia=8){
 async function descargarContenidosParalelo(items, concurrencia=8){
   const resultados = new Map();
   let errores = 0;
+  let desaparecidos = 0; // 404: el archivo ya no existe (otra persona lo compactó/borró tras listar la carpeta)
   await enParalelo(items, async (item)=>{
-    try{
-      const res = await graphFetch(`/drives/${state.driveId}/items/${item.id}/content`);
-      resultados.set(item.id, await res.json());
-    }catch(e){
-      errores++;
-      console.error("No se pudo leer", item.name, e);
+    for (let intento = 1; intento <= 3; intento++){
+      try{
+        const res = await graphFetch(`/drives/${state.driveId}/items/${item.id}/content`);
+        resultados.set(item.id, await res.json());
+        return;
+      }catch(e){
+        if (e.status === 404){ desaparecidos++; return; }
+        if (intento === 3){
+          errores++;
+          console.error("No se pudo leer", item.name, e);
+        } else {
+          await new Promise(r => setTimeout(r, 600 * intento)); // fallo puntual (red, 429, 5xx): reintenta
+        }
+      }
     }
   }, concurrencia);
-  return { resultados, errores };
+  return { resultados, errores, desaparecidos };
 }
 
 async function resolveSiteAndDrive(){
@@ -1030,7 +1039,16 @@ async function apiSqlGetJson(ruta){
     throw new Error("La API SQL no está configurada en esta app (faltan STOCK_API_URL / STOCK_API_CLIENT_ID).");
   }
   const token = await getTokenStockApi();
-  const res = await fetch(`${CONFIG.STOCK_API_URL}${ruta}`, { headers: { "Authorization": `Bearer ${token}` } });
+  let res;
+  try{
+    res = await fetch(`${CONFIG.STOCK_API_URL}${ruta}`, { headers: { "Authorization": `Bearer ${token}` } });
+  }catch(e){
+    // "Failed to fetch": el navegador ni siquiera ha podido llegar a la API (red/VPN/firewall que no
+    // permite esa dirección, certificado, servidor caído…). No es un error de SharePoint.
+    const err = new Error(`No se ha podido contactar con la API SQL (${CONFIG.STOCK_API_URL}). Prueba a abrir esa dirección + "/api/health" en este mismo navegador: si no carga, el problema es de red o del servidor de la API, no de la app.`);
+    err.sinRed = true;
+    throw err;
+  }
   if (!res.ok){
     const texto = await res.text().catch(()=> "");
     const err = new Error(`La API SQL respondió ${res.status} en ${ruta}${texto ? ": " + texto : ""}`);
@@ -1665,19 +1683,26 @@ async function cargarRegistros(){
   state.registrosIncompletosPorRed = false;
   state.registrosConErrores = 0;
   try{
-    // Paginamos hasta traer TODOS los archivos, no solo los primeros (antes se cortaba en 999).
-    let items = [];
-    let url = `/drives/${state.driveId}/root:/${encPath(carpeta)}:/children?$top=200`;
-    while (url){
-      const res = await graphFetch(url);
-      const data = await res.json();
-      items = items.concat(data.value.filter(i=>i.file && i.name !== NOMBRE_CANDADO));
-      url = data["@odata.nextLink"] || null;
+    // Si mientras leemos otra persona compacta el inventario (crea un _archivado_ y borra los
+    // sueltos), algunos archivos de nuestra lista dejan de existir. En ese caso volvemos a
+    // listar la carpeta (ya con los archivos compactados) en vez de dar la carga por buena.
+    let items, contenidos, errores, desaparecidos;
+    for (let pasada = 1; pasada <= 4; pasada++){
+      // Paginamos hasta traer TODOS los archivos, no solo los primeros (antes se cortaba en 999).
+      items = [];
+      let url = `/drives/${state.driveId}/root:/${encPath(carpeta)}:/children?$top=200`;
+      while (url){
+        const res = await graphFetch(url);
+        const data = await res.json();
+        items = items.concat(data.value.filter(i=>i.file && i.name !== NOMBRE_CANDADO));
+        url = data["@odata.nextLink"] || null;
+      }
+      // Contenidos en paralelo (varios a la vez), no de uno en uno.
+      ({ resultados: contenidos, errores, desaparecidos } = await descargarContenidosParalelo(items));
+      if (!desaparecidos) break;
+      await new Promise(r => setTimeout(r, 1000 * pasada));
     }
-
-    // Contenidos en paralelo (varios a la vez), no de uno en uno.
-    const { resultados: contenidos, errores } = await descargarContenidosParalelo(items);
-    state.registrosConErrores = errores;
+    state.registrosConErrores = errores + desaparecidos;
     const registros = [];
     for (const item of items){
       const datos = contenidos.get(item.id);
@@ -1733,13 +1758,17 @@ async function arrancarApp(account){
   $("#nombre-usuario").textContent = account.name || account.username;
   setEstado("Conectando con SharePoint…");
 
+  let paso = "conexión con SharePoint";
   try{
     await resolveSiteAndDrive();
     state.avisosMaestros = [];
+    paso = "carga de artículos desde la API SQL";
     setEstado("Cargando artículos desde la API…");
     await loadMaster();
+    paso = "carga de almacenes desde la API SQL";
     setEstado("Cargando almacenes desde la API…");
     await loadAlmacenesMaestro();
+    paso = "pantalla inicial";
     if (state.avisosMaestros.length){
       setEstado(`Conectado · ${state.articulos.length} artículos · ${state.almacenesMaestro.length} almacenes<br>⚠ ${state.avisosMaestros.join(" · ")}`);
     } else {
@@ -1751,7 +1780,7 @@ async function arrancarApp(account){
   }catch(e){
     console.error(e);
     setEstado("Error de conexión — revisa la CONFIG (ver detalle abajo)", "error");
-    $("#contenido").innerHTML = `<div class="aviso error">No se ha podido conectar con SharePoint.<br><br><b>Detalle:</b> ${e.message}<br><br>Revisa en la CONFIG del archivo: SITE_URL, LIBRARY_NAME, ROOT_FOLDER, STOCK_API_URL y STOCK_API_CLIENT_ID, y que la cuenta tenga acceso a ese sitio y a la API SQL.</div>`;
+    $("#contenido").innerHTML = `<div class="aviso error">No se ha podido arrancar la app. Ha fallado: <b>${paso}</b>.<br><br><b>Detalle:</b> ${e.message}<br><br>Revisa en la CONFIG del archivo: SITE_URL, LIBRARY_NAME, ROOT_FOLDER, STOCK_API_URL y STOCK_API_CLIENT_ID, y que la cuenta tenga acceso a ese sitio y a la API SQL.</div>`;
   }
 }
 
