@@ -503,7 +503,7 @@ const ICONOS = {
 
 // Versión de la app — súbela cada vez que se publique un cambio (y recuerda subir también
 // CACHE_VERSION en sw.js a la vez, para que la caché antigua no se quede pegada).
-const APP_VERSION = "2.5";
+const APP_VERSION = "2.6";
 
 const CONFIG = {
   // Client ID (Id. de aplicación) de tu App Registration en Entra ID
@@ -522,16 +522,9 @@ const CONFIG = {
   // carpetas de almacén están directamente en la raíz de la biblioteca.
   ROOT_FOLDER: "",
 
-  // Ruta del Excel maestro de artículos dentro de esa misma biblioteca
-  MASTER_FILE_PATH: "_Productos.xlsx",
-
-  // Maestro de almacenes: 1ª columna código, 2ª columna nombre del almacén (con encabezado).
-  ALMACENES_FILE_PATH: "Almacenes.xlsx",
-
-  // Déjalo vacío para usar la primera hoja del Excel maestro
-  MASTER_SHEET_NAME: "",
-
-  // API de stock en vivo (SQL), en paralelo al Excel manual de "Ver diferencias".
+  // API SQL de la empresa: de aquí salen el stock de sistema, el maestro de ARTÍCULOS
+  // (/api/inventarios/articulos) y el maestro de ALMACENES (/api/inventarios/almacenes).
+  // Antes los dos maestros se leían de Excel en SharePoint (_Productos.xlsx y Almacenes.xlsx).
   // Ya en HTTPS (app.capa.es) — funciona tanto desde local (Live Server) como desde la app real.
   // OJO: IT ha comentado que puede que muevan esto a otro puerto (ej. 8080) más adelante;
   // si la URL cambia, hay que actualizar esta línea otra vez.
@@ -565,6 +558,7 @@ const state = {
   articulos: [],
   articulosPorCodigo: new Map(),
   almacenesMaestro: [],
+  avisosMaestros: [],
   almacenesPorNombre: new Map(),
   almacenes: [],
   inventarios: [],
@@ -1029,28 +1023,69 @@ function normalizarArticulo(fila){
   return { codigo, descripcion, unidades, unidadSistema };
 }
 
+// GET autenticado (token de Entra ID de la "API SQL") a la API de la empresa; devuelve el JSON.
+async function apiSqlGetJson(ruta){
+  if (!CONFIG.STOCK_API_URL || !CONFIG.STOCK_API_CLIENT_ID){
+    throw new Error("La API SQL no está configurada en esta app (faltan STOCK_API_URL / STOCK_API_CLIENT_ID).");
+  }
+  const token = await getTokenStockApi();
+  const res = await fetch(`${CONFIG.STOCK_API_URL}${ruta}`, { headers: { "Authorization": `Bearer ${token}` } });
+  if (!res.ok){
+    const texto = await res.text().catch(()=> "");
+    const err = new Error(`La API SQL respondió ${res.status} en ${ruta}${texto ? ": " + texto : ""}`);
+    err.status = res.status;
+    throw err;
+  }
+  return await res.json();
+}
+
+// Copia local (en este dispositivo) de la última carga correcta de un maestro. Solo sirve para
+// poder arrancar si la API no responde en ese momento; si la API responde, siempre manda la API.
+function guardarCopiaMaestro(clave, datos){
+  try{ localStorage.setItem(clave, JSON.stringify({ guardadoEn: new Date().toISOString(), datos })); }catch(e){ /* sin espacio o sin acceso: no pasa nada */ }
+}
+function leerCopiaMaestro(clave){
+  try{
+    const bruto = localStorage.getItem(clave);
+    if (!bruto) return null;
+    const obj = JSON.parse(bruto);
+    return Array.isArray(obj?.datos) ? obj : null;
+  }catch(e){ return null; }
+}
+const CLAVE_COPIA_ARTICULOS = "capa_copia_maestro_articulos";
+const CLAVE_COPIA_ALMACENES = "capa_copia_maestro_almacenes";
+
+// Pide un maestro a la API; si falla y hay copia local, usa la copia y lo avisa en la barra de estado.
+async function cargarMaestroApi(ruta, claveCopia, etiqueta){
+  try{
+    const filas = await apiSqlGetJson(ruta);
+    if (!Array.isArray(filas)) throw new Error(`Respuesta inesperada de la API en ${ruta}.`);
+    guardarCopiaMaestro(claveCopia, filas);
+    return filas;
+  }catch(e){
+    const copia = leerCopiaMaestro(claveCopia);
+    if (copia){
+      console.error(`No se pudo cargar ${etiqueta} desde la API; se usa la copia local del ${copia.guardadoEn}:`, e);
+      state.avisosMaestros.push(`${etiqueta}: copia local del ${fmtFecha(copia.guardadoEn)} (la API no ha respondido)`);
+      return copia.datos;
+    }
+    throw e;
+  }
+}
+
 async function loadMaster(){
-  const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(CONFIG.MASTER_FILE_PATH)}:/content`);
-  const buf = await res.arrayBuffer();
-  const wb = XLSX.read(buf, { type:"array" });
-  const hoja = CONFIG.MASTER_SHEET_NAME || wb.SheetNames[0];
-  const ws = wb.Sheets[hoja];
-  if (!ws) throw new Error(`No se encontró la hoja "${hoja}" en el Excel maestro.`);
-  const filas = XLSX.utils.sheet_to_json(ws, { defval:"" });
+  // Cada fila de la API trae: c_articulo, n_articulo, art_descrip, unidad, descrip_unidad, conv_unidad,
+  // descrip_env1, conv_env_1, descrip_env2, conv_env_2 — los nombres que ya entiende normalizarArticulo.
+  const filas = await cargarMaestroApi("/api/inventarios/articulos", CLAVE_COPIA_ARTICULOS, "Artículos");
   state.articulos = filas.map(normalizarArticulo).filter(a => a.codigo);
   state.articulosPorCodigo = new Map(state.articulos.map(a => [a.codigo, a]));
 }
 
 async function loadAlmacenesMaestro(){
-  const res = await graphFetch(`/drives/${state.driveId}/root:/${encPath(CONFIG.ALMACENES_FILE_PATH)}:/content`);
-  const buf = await res.arrayBuffer();
-  const wb = XLSX.read(buf, { type:"array" });
-  const ws = wb.Sheets[wb.SheetNames[0]];
-  // Igual que el stock de sistema: leemos por posición de columna (1ª código, 2ª nombre),
-  // sin depender del texto exacto del encabezado. Se salta la primera fila (encabezado).
-  const filas = XLSX.utils.sheet_to_json(ws, { header:1, defval:"", range:1 });
+  // Cada fila de la API trae: xalmacen_id (código) y almacen (nombre).
+  const filas = await cargarMaestroApi("/api/inventarios/almacenes", CLAVE_COPIA_ALMACENES, "Almacenes");
   state.almacenesMaestro = filas
-    .map(fila => ({ codigo: String(fila[0] ?? "").trim(), nombre: String(fila[1] ?? "").trim() }))
+    .map(f => ({ codigo: String(f.xalmacen_id ?? "").trim(), nombre: String(f.almacen ?? "").trim() }))
     .filter(a => a.nombre)
     .sort((a,b) => a.codigo.localeCompare(b.codigo, "es", {numeric:true}));
   state.almacenesPorNombre = new Map(state.almacenesMaestro.map(a => [a.nombre, a]));
@@ -1676,23 +1711,28 @@ async function arrancarApp(account){
 
   try{
     await resolveSiteAndDrive();
-    setEstado("Cargando maestro de artículos…");
+    state.avisosMaestros = [];
+    setEstado("Cargando artículos desde la API…");
     await loadMaster();
-    setEstado("Cargando maestro de almacenes…");
+    setEstado("Cargando almacenes desde la API…");
     await loadAlmacenesMaestro();
-    setEstado(`Conectado · ${state.articulos.length} artículos · ${state.almacenesMaestro.length} almacenes`, "ok");
+    if (state.avisosMaestros.length){
+      setEstado(`Conectado · ${state.articulos.length} artículos · ${state.almacenesMaestro.length} almacenes<br>⚠ ${state.avisosMaestros.join(" · ")}`);
+    } else {
+      setEstado(`Conectado · ${state.articulos.length} artículos · ${state.almacenesMaestro.length} almacenes`, "ok");
+    }
     await cargarAlmacenes();
     await actualizarBadgePendientes();
     sincronizarPendientes(); // por si hay registros guardados sin conexión de una sesión anterior
   }catch(e){
     console.error(e);
     setEstado("Error de conexión — revisa la CONFIG (ver detalle abajo)", "error");
-    $("#contenido").innerHTML = `<div class="aviso error">No se ha podido conectar con SharePoint.<br><br><b>Detalle:</b> ${e.message}<br><br>Revisa en la CONFIG del archivo: SITE_URL, LIBRARY_NAME, ROOT_FOLDER, MASTER_FILE_PATH y ALMACENES_FILE_PATH, y que la cuenta tenga acceso a ese sitio.</div>`;
+    $("#contenido").innerHTML = `<div class="aviso error">No se ha podido conectar con SharePoint.<br><br><b>Detalle:</b> ${e.message}<br><br>Revisa en la CONFIG del archivo: SITE_URL, LIBRARY_NAME, ROOT_FOLDER, STOCK_API_URL y STOCK_API_CLIENT_ID, y que la cuenta tenga acceso a ese sitio y a la API SQL.</div>`;
   }
 }
 
 function poblarSelectAlmacenes(){
-  // El almacén ya no se crea a mano: la lista sale siempre del maestro "Almacenes.xlsx".
+  // El almacén ya no se crea a mano: la lista sale siempre de la API (/api/inventarios/almacenes).
   state.almacenes = state.almacenesMaestro.map(a => a.nombre);
   const sel = $("#sel-almacen");
   sel.innerHTML = state.almacenes.map(a=>`<option value="${a}">${a}</option>`).join("");
@@ -1706,7 +1746,7 @@ function mostrarPantallaElegirAlmacen(){
   poblarSelectAlmacenes();
   const lista = $("#lista-elegir-almacen");
   if (!state.almacenes.length){
-    lista.innerHTML = `<div class="aviso error">No hay ningún almacén disponible. Revisa que el archivo "${CONFIG.ALMACENES_FILE_PATH}" tenga filas con código y nombre de almacén.</div>`;
+    lista.innerHTML = `<div class="aviso error">No hay ningún almacén disponible. La API (/api/inventarios/almacenes) no ha devuelto ningún almacén.</div>`;
   } else {
     let ultimoUsado = null;
     try{ ultimoUsado = localStorage.getItem("capa_ultimo_almacen"); }catch(e){}
@@ -1807,7 +1847,7 @@ function renderRegistrar(){
   const cont = $("#contenido");
 
   if (!state.almacenActual){
-    cont.innerHTML = `<div class="aviso error">No hay ningún almacén disponible. Revisa que el archivo "${CONFIG.ALMACENES_FILE_PATH}" tenga filas con código y nombre de almacén.</div>`;
+    cont.innerHTML = `<div class="aviso error">No hay ningún almacén disponible. La API (/api/inventarios/almacenes) no ha devuelto ningún almacén.</div>`;
     return;
   }
   if (!state.inventarioActual){
@@ -2176,7 +2216,7 @@ async function renderInventario(){
   const cont = $("#contenido");
 
   if (!state.almacenActual){
-    cont.innerHTML = `<div class="aviso error">No hay ningún almacén disponible. Revisa que el archivo "${CONFIG.ALMACENES_FILE_PATH}" tenga filas con código y nombre de almacén.</div>`;
+    cont.innerHTML = `<div class="aviso error">No hay ningún almacén disponible. La API (/api/inventarios/almacenes) no ha devuelto ningún almacén.</div>`;
     return;
   }
   if (!state.inventarioActual){
